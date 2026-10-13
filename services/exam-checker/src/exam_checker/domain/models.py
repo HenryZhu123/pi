@@ -218,6 +218,9 @@ class ReviewCheck(StrictModel):
     ]
     result: SpecialistReviewResult | None = None
     latency_ms: int = Field(ge=0)
+    attempts: int = Field(default=0, ge=0)
+    error_code: str | None = None
+    retryable: bool | None = None
     error: str | None = None
 
 
@@ -245,5 +248,12 @@ class QuestionReview(StrictModel):
 class ReviewedQuestion(StrictModel):
     document_id: str
     question_id: str
+    question_number: str
     question: CheckerPayload
     review: QuestionReview
+
+
+class ReviewedDocument(StrictModel):
+    document_id: str
+    status: Literal["PASS", "NEEDS_REVISION", "UNRESOLVED"]
+    questions: list[ReviewedQuestion]

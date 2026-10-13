@@ -38,7 +38,7 @@ class Settings:
     review_llm_model: str
     review_llm_timeout_seconds: float
     review_llm_max_concurrency: int
-    review_llm_max_retries: int
+    review_llm_max_attempts: int
     review_prompt_root: str
     jev_base_url: str
     jev_api_key: str
@@ -95,8 +95,8 @@ class Settings:
             review_llm_max_concurrency=_positive_int(
                 "EXAM_CHECKER_REVIEW_LLM_MAX_CONCURRENCY", 8
             ),
-            review_llm_max_retries=_positive_int(
-                "EXAM_CHECKER_REVIEW_LLM_MAX_RETRIES", 2
+            review_llm_max_attempts=_positive_int(
+                "EXAM_CHECKER_REVIEW_LLM_MAX_ATTEMPTS", 3
             ),
             review_prompt_root=os.getenv(
                 "EXAM_CHECKER_REVIEW_PROMPT_ROOT",

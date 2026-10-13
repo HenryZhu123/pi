@@ -53,7 +53,7 @@ class RecordingReviewer:
 
     async def review(
         self, task_id: str, payload: CheckerPayload
-    ) -> tuple[SpecialistReviewResult, int]:
+    ) -> tuple[SpecialistReviewResult, int, int]:
         self.calls.append(task_id)
         if task_id not in {"options_check", "mismatch_check", "answer_leak_check"}:
             self.direct_started.set()
@@ -65,6 +65,7 @@ class RecordingReviewer:
                 errors=[],
             ),
             20,
+            1,
         )
 
 
@@ -81,6 +82,7 @@ async def test_direct_checks_start_while_jev_routes_and_only_run_selected_tasks(
         service.review_question(
             document_id="exam_1",
             question_id="question_1",
+            question_number="1",
             payload=CheckerPayload(
                 reference="【题型】选择题", detection_content="题目\nA.甲\nB.乙"
             ),
@@ -128,6 +130,7 @@ async def test_jev_failure_fails_open_to_every_specialist() -> None:
     result = await service.review_question(
         document_id="exam_1",
         question_id="question_1",
+        question_number="1",
         payload=CheckerPayload(reference="", detection_content="测试题"),
     )
 
@@ -154,7 +157,7 @@ class MixedReviewer:
 
     async def review(
         self, task_id: str, payload: CheckerPayload
-    ) -> tuple[SpecialistReviewResult, int]:
+    ) -> tuple[SpecialistReviewResult, int, int]:
         if task_id == "logic_check":
             raise RuntimeError("provider timeout")
         if task_id == "typo_check":
@@ -176,6 +179,7 @@ class MixedReviewer:
                     errors=[error],
                 ),
                 20,
+                1,
             )
         return (
             SpecialistReviewResult(
@@ -185,6 +189,7 @@ class MixedReviewer:
                 errors=[],
             ),
             20,
+            1,
         )
 
 
@@ -199,6 +204,7 @@ async def test_specialist_failure_makes_question_unresolved_without_losing_error
     result = await service.review_question(
         document_id="exam_1",
         question_id="question_1",
+        question_number="1",
         payload=CheckerPayload(reference="", detection_content="计祘机网络"),
     )
 
@@ -206,3 +212,9 @@ async def test_specialist_failure_makes_question_unresolved_without_losing_error
     assert result.review.summary.has_error
     assert result.review.summary.total_errors == 1
     assert result.review.summary.unresolved_checks == ["logic_check"]
+    failed = next(
+        check for check in result.review.checks if check.task_id == "logic_check"
+    )
+    assert failed.attempts == 1
+    assert failed.error_code == "SPECIALIST_FAILED"
+    assert failed.retryable is False

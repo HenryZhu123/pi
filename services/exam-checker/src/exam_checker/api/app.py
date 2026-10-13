@@ -5,7 +5,13 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, File, HTTPException, UploadFile
 
 from ..config import Settings
-from ..domain.models import CheckerPayload, ExamDocument, QuestionView, ReviewedQuestion
+from ..domain.models import (
+    CheckerPayload,
+    ExamDocument,
+    QuestionView,
+    ReviewedDocument,
+    ReviewedQuestion,
+)
 from ..integrations.libreoffice import LibreOfficeConverter, LibreOfficeError
 from ..integrations.mineru_agent import (
     MAX_FILE_BYTES,
@@ -25,6 +31,7 @@ from ..services.document_parse_service import (
     DocumentParseService,
     UnsupportedDocumentError,
 )
+from ..services.document_review_service import DocumentReviewService
 from ..services.document_store import DocumentNotFoundError, InMemoryExamDocumentStore
 from ..services.question_service import QuestionNotFoundError, QuestionService
 from ..services.question_review_service import QuestionReviewService
@@ -63,12 +70,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         review_prompts,
         timeout_seconds=resolved.review_llm_timeout_seconds,
         max_concurrency=resolved.review_llm_max_concurrency,
-        max_retries=resolved.review_llm_max_retries,
+        max_attempts=resolved.review_llm_max_attempts,
     )
     review_service = QuestionReviewService(
         router=jev_client,
         reviewer=specialist_reviewer,
         jev_prompts=jev_prompts,
+    )
+    document_review_service = DocumentReviewService(
+        question_service=question_service,
+        question_review_service=review_service,
     )
     parse_service = DocumentParseService(
         mineru=mineru,
@@ -163,6 +174,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Question not found") from exc
 
     @application.post(
+        "/v1/exam-checker/documents/{document_id}/review",
+        response_model=ReviewedDocument,
+    )
+    async def review_document(document_id: str) -> ReviewedDocument:
+        try:
+            document = await store.get(document_id)
+            return await application.state.document_review_service.review_document(
+                document
+            )
+        except DocumentNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Document not found") from exc
+
+    @application.post(
         "/v1/exam-checker/documents/{document_id}/questions/{question_id}/review",
         response_model=ReviewedQuestion,
     )
@@ -171,10 +195,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> ReviewedQuestion:
         try:
             document = await store.get(document_id)
+            question = question_service.get_question(document, question_id)
             payload = question_service.to_checker_payload(document, question_id)
             return await application.state.review_service.review_question(
                 document_id=document_id,
                 question_id=question_id,
+                question_number=question.question_number,
                 payload=payload,
             )
         except DocumentNotFoundError as exc:
@@ -186,6 +212,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.document_store = store
     application.state.question_service = question_service
     application.state.review_service = review_service
+    application.state.document_review_service = document_review_service
     return application
 
 

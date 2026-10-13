@@ -47,7 +47,7 @@ class SpecialistReviewer(Protocol):
 
     async def review(
         self, task_id: ReviewTaskId, payload: CheckerPayload
-    ) -> tuple[SpecialistReviewResult, int]: ...
+    ) -> tuple[SpecialistReviewResult, int, int]: ...
 
 
 class QuestionReviewService:
@@ -71,6 +71,7 @@ class QuestionReviewService:
         *,
         document_id: str,
         question_id: str,
+        question_number: str,
         payload: CheckerPayload,
     ) -> ReviewedQuestion:
         started = time.perf_counter()
@@ -119,6 +120,7 @@ class QuestionReviewService:
         return ReviewedQuestion(
             document_id=document_id,
             question_id=question_id,
+            question_number=question_number,
             question=payload,
             review=QuestionReview(
                 status=status,
@@ -176,6 +178,7 @@ class QuestionReviewService:
                     routing_mode="jev",
                     execution_status="SKIPPED_BY_ROUTER",
                     latency_ms=decision.latency_ms,
+                    attempts=0,
                 ),
                 decision,
             )
@@ -189,7 +192,7 @@ class QuestionReviewService:
     ) -> ReviewCheck:
         started = time.perf_counter()
         try:
-            result, latency_ms = await self.reviewer.review(task_id, payload)
+            result, latency_ms, attempts = await self.reviewer.review(task_id, payload)
             return ReviewCheck(
                 task_id=task_id,
                 routing_mode=routing_mode,
@@ -197,6 +200,7 @@ class QuestionReviewService:
                 execution_status="COMPLETED",
                 result=result,
                 latency_ms=latency_ms,
+                attempts=attempts,
             )
         except Exception as exc:
             return ReviewCheck(
@@ -205,6 +209,9 @@ class QuestionReviewService:
                 model=self.reviewer.model,
                 execution_status="FAILED",
                 latency_ms=round((time.perf_counter() - started) * 1000),
+                attempts=max(1, getattr(exc, "attempts", 1)),
+                error_code=getattr(exc, "error_code", "SPECIALIST_FAILED"),
+                retryable=getattr(exc, "retryable", False),
                 error=str(exc),
             )
 
