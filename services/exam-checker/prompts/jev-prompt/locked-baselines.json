@@ -1,0 +1,89 @@
+{
+  "options_check": {
+    "status": "locked",
+    "model": "typesafe/jev-1.13-20260917",
+    "skip_threshold": 0.7,
+    "prompt_path": "tasks/options.json",
+    "prompt_sha256": "6eefbc1e3e0fa296be78bc2eea155cd5f49b0a8ba13c41a22ca842217a1adcf3",
+    "shared_routing_rules_sha256": "fd441a643799bbd8a1651f694966079ec532463d34aa120ba109633d9e526c68",
+    "evaluation": {
+      "sample_size": 300,
+      "positive_count": 150,
+      "negative_count": 150,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f2": 1.0,
+      "fnr_frr": 0.0,
+      "fpr": 0.0
+    }
+  },
+  "mismatch_check": {
+    "status": "locked",
+    "locked_at": "2026-10-12",
+    "model": "typesafe/jev-1.13-20260917",
+    "skip_threshold": 0.95,
+    "prompt_path": "tasks/mismatch.json",
+    "prompt_sha256": "784544236ee6d6df8f14281b5523e6f913102900961130f7b8ba6f7a4af3ab91",
+    "shared_routing_rules_sha256": "fd441a643799bbd8a1651f694966079ec532463d34aa120ba109633d9e526c68",
+    "evaluation": {
+      "artifact_path": "tmp/jev-eval/mismatch-300-v2/summary.json",
+      "sample_size": 300,
+      "positive_count": 150,
+      "negative_count": 150,
+      "TP": 147,
+      "TN": 132,
+      "FP": 18,
+      "FN": 3,
+      "precision": 0.8909,
+      "recall": 0.98,
+      "f2": 0.9608,
+      "fnr_frr": 0.02,
+      "fpr": 0.12,
+      "normal_skip_rate": 0.88,
+      "overall_skip_rate": 0.45
+    },
+    "same_sample_relabel_check": {
+      "source_artifact_path": "tmp/jev-eval/mismatch-300-v1/results.json",
+      "sample_size": 300,
+      "positive_count": 148,
+      "negative_count": 152,
+      "TP": 147,
+      "TN": 127,
+      "FP": 25,
+      "FN": 1,
+      "precision": 0.8547,
+      "recall": 0.9932,
+      "f2": 0.962,
+      "fnr_frr": 0.0068,
+      "fpr": 0.1645,
+      "normal_skip_rate": 0.8355,
+      "overall_skip_rate": 0.4267
+    }
+  },
+  "answer_leak_check": {
+    "status": "locked",
+    "locked_at": "2026-10-12",
+    "model": "typesafe/jev-1.13-20260917",
+    "skip_threshold": 0.99,
+    "prompt_path": "tasks/answer-leak.json",
+    "prompt_sha256": "43b433cd9f5703ee3ea8bed6ac4ed10681491c56cfaa208ec25a933b0cba4157",
+    "shared_routing_rules_sha256": "fd441a643799bbd8a1651f694966079ec532463d34aa120ba109633d9e526c68",
+    "evaluation": {
+      "artifact_path": "tmp/jev-eval/answer-leak-182-v1/summary.json",
+      "sample_size": 182,
+      "positive_count": 98,
+      "negative_count": 84,
+      "TP": 95,
+      "TN": 71,
+      "FP": 13,
+      "FN": 3,
+      "precision": 0.8796,
+      "recall": 0.9694,
+      "f2": 0.95,
+      "fnr_frr": 0.0306,
+      "fpr": 0.1548,
+      "normal_skip_rate": 0.8452,
+      "overall_skip_rate": 0.4066
+    }
+  }
+}
