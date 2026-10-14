@@ -1,0 +1,133 @@
+from __future__ import annotations
+
+from typing import Any
+from uuid import UUID, uuid4
+
+import pytest
+
+from exam_checker.domain.models import (
+    CheckerPayload,
+    QuestionReview,
+    ReviewedQuestion,
+    ReviewSummary,
+    ReviewTiming,
+)
+from exam_checker.services.persistence import StoredQuestionReview
+from exam_checker.services.question_bank_service import (
+    QuestionBankService,
+    QuestionBankValidationError,
+    ReviewNotPassedError,
+)
+
+
+def make_review(status: str = "PASS") -> ReviewedQuestion:
+    return ReviewedQuestion(
+        document_id="exam_1",
+        question_id="question_1",
+        question_number="1",
+        question=CheckerPayload(reference="", detection_content="测试题"),
+        review=QuestionReview(
+            status=status,
+            routing={},
+            checks=[],
+            summary=ReviewSummary(
+                has_error=False,
+                total_errors=0,
+                errors=[],
+                unresolved_checks=[],
+            ),
+            timing_ms=ReviewTiming(routing=0, specialist_checks=0, total=1),
+        ),
+    )
+
+
+class FakeReviewRepository:
+    def __init__(self, review: ReviewedQuestion) -> None:
+        self.stored = StoredQuestionReview(review_id=uuid4(), review=review)
+
+    async def save(self, review: ReviewedQuestion) -> UUID:
+        raise AssertionError("ingestion must not create a review")
+
+    async def get_latest(
+        self, document_id: str, question_id: str
+    ) -> StoredQuestionReview:
+        assert (document_id, question_id) == ("exam_1", "question_1")
+        return self.stored
+
+
+class FakeQuestionBankRepository:
+    stored: dict[str, Any] | None = None
+
+    async def store(self, **values: Any) -> None:
+        self.stored = values
+
+
+@pytest.mark.asyncio
+async def test_ingest_stores_complete_json_after_passed_review() -> None:
+    bank_repository = FakeQuestionBankRepository()
+    service = QuestionBankService(
+        review_repository=FakeReviewRepository(make_review()),
+        question_bank_repository=bank_repository,
+    )
+    question_json = {
+        "question_id": "question_1",
+        "question_number": "1",
+        "question_content": "测试题",
+        "subject": "计算机",
+        "question_type": "short_answer",
+        "points": 5,
+        "difficulty": "medium",
+        "knowledge_points": ["测试知识点"],
+        "review_status": "PASS",
+    }
+
+    result = await service.ingest(
+        document_id="exam_1",
+        question_id="question_1",
+        question_json=question_json,
+    )
+
+    assert result.status == "STORED"
+    assert bank_repository.stored is not None
+    stored_json = bank_repository.stored["question_json"]
+    assert stored_json["question_content"] == "测试题"
+    assert stored_json["ingestion"] == {
+        "status": "STORED",
+        "record_id": result.record_id,
+    }
+    assert "ingestion" not in question_json
+
+
+@pytest.mark.asyncio
+async def test_ingest_rejects_question_whose_latest_review_did_not_pass() -> None:
+    service = QuestionBankService(
+        review_repository=FakeReviewRepository(make_review("NEEDS_REVISION")),
+        question_bank_repository=FakeQuestionBankRepository(),
+    )
+
+    with pytest.raises(ReviewNotPassedError):
+        await service.ingest(
+            document_id="exam_1",
+            question_id="question_1",
+            question_json={},
+        )
+
+
+@pytest.mark.asyncio
+async def test_ingest_requires_metadata() -> None:
+    service = QuestionBankService(
+        review_repository=FakeReviewRepository(make_review()),
+        question_bank_repository=FakeQuestionBankRepository(),
+    )
+
+    with pytest.raises(QuestionBankValidationError, match="difficulty"):
+        await service.ingest(
+            document_id="exam_1",
+            question_id="question_1",
+            question_json={
+                "question_id": "question_1",
+                "question_content": "测试题",
+                "review_status": "PASS",
+                "knowledge_points": [],
+            },
+        )

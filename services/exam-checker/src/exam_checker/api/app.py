@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 
 from ..config import Settings
+from ..database import (
+    Database,
+    PostgresExamDocumentStore,
+    PostgresQuestionBankRepository,
+    PostgresQuestionReviewRepository,
+)
 from ..domain.models import (
     CheckerPayload,
     ExamDocument,
+    IngestionResult,
     QuestionView,
     ReviewedDocument,
     ReviewedQuestion,
@@ -33,6 +41,12 @@ from ..services.document_parse_service import (
 )
 from ..services.document_review_service import DocumentReviewService
 from ..services.document_store import DocumentNotFoundError, InMemoryExamDocumentStore
+from ..services.persistence import QuestionAlreadyStoredError, ReviewNotFoundError
+from ..services.question_bank_service import (
+    QuestionBankService,
+    QuestionBankValidationError,
+    ReviewNotPassedError,
+)
 from ..services.question_service import QuestionNotFoundError, QuestionService
 from ..services.question_review_service import QuestionReviewService
 
@@ -51,7 +65,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         resolved.llm_model,
         timeout_seconds=resolved.llm_timeout_seconds,
     )
-    store = InMemoryExamDocumentStore()
+    database = Database(resolved.database_url) if resolved.database_url else None
+    if database is None:
+        store = InMemoryExamDocumentStore()
+        review_repository = None
+        question_bank_service = None
+    else:
+        store = PostgresExamDocumentStore(database.sessions)
+        review_repository = PostgresQuestionReviewRepository(database.sessions)
+        question_bank_service = QuestionBankService(
+            review_repository=review_repository,
+            question_bank_repository=PostgresQuestionBankRepository(database.sessions),
+        )
     question_service = QuestionService()
     jev_prompts = JevPromptRepository(resolved.jev_prompt_root)
     review_prompts = ReviewPromptRepository(resolved.review_prompt_root)
@@ -76,6 +101,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         router=jev_client,
         reviewer=specialist_reviewer,
         jev_prompts=jev_prompts,
+        review_repository=review_repository,
     )
     document_review_service = DocumentReviewService(
         question_service=question_service,
@@ -96,6 +122,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await extractor.close()
         await jev_client.close()
         await specialist_reviewer.close()
+        if database is not None:
+            await database.close()
 
     application = FastAPI(
         title="Exam Checker Service",
@@ -190,9 +218,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         "/v1/exam-checker/documents/{document_id}/questions/{question_id}/review",
         response_model=ReviewedQuestion,
     )
-    async def review_question(
-        document_id: str, question_id: str
-    ) -> ReviewedQuestion:
+    async def review_question(document_id: str, question_id: str) -> ReviewedQuestion:
         try:
             document = await store.get(document_id)
             question = question_service.get_question(document, question_id)
@@ -208,11 +234,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except QuestionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="Question not found") from exc
 
+    @application.post(
+        "/v1/exam-checker/documents/{document_id}/questions/{question_id}/ingest",
+        response_model=IngestionResult,
+    )
+    async def ingest_question(
+        document_id: str,
+        question_id: str,
+        question_json: dict[str, Any],
+    ) -> IngestionResult:
+        if question_bank_service is None:
+            raise HTTPException(
+                status_code=503, detail="PostgreSQL persistence is not configured"
+            )
+        try:
+            return await question_bank_service.ingest(
+                document_id=document_id,
+                question_id=question_id,
+                question_json=question_json,
+            )
+        except ReviewNotFoundError as exc:
+            raise HTTPException(
+                status_code=404, detail="No review exists for this question"
+            ) from exc
+        except ReviewNotPassedError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except QuestionAlreadyStoredError as exc:
+            raise HTTPException(
+                status_code=409, detail="Question is already stored"
+            ) from exc
+        except QuestionBankValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     application.state.parse_service = parse_service
     application.state.document_store = store
     application.state.question_service = question_service
     application.state.review_service = review_service
     application.state.document_review_service = document_review_service
+    application.state.database = database
+    application.state.question_bank_service = question_bank_service
     return application
 
 

@@ -213,9 +213,7 @@ class ReviewCheck(StrictModel):
     task_id: ReviewTaskId
     routing_mode: Literal["jev", "direct"]
     model: str | None = None
-    execution_status: Literal[
-        "SKIPPED_BY_ROUTER", "COMPLETED", "FAILED"
-    ]
+    execution_status: Literal["SKIPPED_BY_ROUTER", "COMPLETED", "FAILED"]
     result: SpecialistReviewResult | None = None
     latency_ms: int = Field(ge=0)
     attempts: int = Field(default=0, ge=0)
@@ -257,3 +255,8 @@ class ReviewedDocument(StrictModel):
     document_id: str
     status: Literal["PASS", "NEEDS_REVISION", "UNRESOLVED"]
     questions: list[ReviewedQuestion]
+
+
+class IngestionResult(StrictModel):
+    status: Literal["STORED"] = "STORED"
+    record_id: str

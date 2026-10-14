@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Protocol
 
 from ..domain.models import ExamDocument
 
 
 class DocumentNotFoundError(KeyError):
     pass
+
+
+class ExamDocumentStore(Protocol):
+    async def save(self, document: ExamDocument) -> None: ...
+
+    async def get(self, document_id: str) -> ExamDocument: ...
 
 
 class InMemoryExamDocumentStore:

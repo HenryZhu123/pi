@@ -25,6 +25,7 @@ def _positive_int(name: str, default: int) -> int:
 class Settings:
     host: str
     port: int
+    database_url: str
     mineru_base_url: str
     mineru_timeout_seconds: float
     mineru_poll_interval_seconds: float
@@ -62,6 +63,7 @@ class Settings:
         return cls(
             host=os.getenv("EXAM_CHECKER_HOST", "127.0.0.1").strip() or "127.0.0.1",
             port=_positive_int("EXAM_CHECKER_PORT", 8091),
+            database_url=os.getenv("EXAM_CHECKER_DATABASE_URL", "").strip(),
             mineru_base_url=(
                 os.getenv("MINERU_AGENT_BASE_URL", "https://mineru.net/api/v1/agent")
                 .strip()
@@ -113,15 +115,9 @@ class Settings:
             jev_api_key=os.getenv(
                 "EXAM_CHECKER_JEV_API_KEY", os.getenv("OPENROUTER_API_KEY", "")
             ).strip(),
-            jev_model=os.getenv(
-                "EXAM_CHECKER_JEV_MODEL", "typesafe/jev-1.13"
-            ).strip(),
-            jev_timeout_seconds=_positive_float(
-                "EXAM_CHECKER_JEV_TIMEOUT_SECONDS", 30
-            ),
-            jev_max_concurrency=_positive_int(
-                "EXAM_CHECKER_JEV_MAX_CONCURRENCY", 8
-            ),
+            jev_model=os.getenv("EXAM_CHECKER_JEV_MODEL", "typesafe/jev-1.13").strip(),
+            jev_timeout_seconds=_positive_float("EXAM_CHECKER_JEV_TIMEOUT_SECONDS", 30),
+            jev_max_concurrency=_positive_int("EXAM_CHECKER_JEV_MAX_CONCURRENCY", 8),
             jev_prompt_root=os.getenv(
                 "EXAM_CHECKER_JEV_PROMPT_ROOT",
                 str(default_prompt_root / "jev-prompt"),

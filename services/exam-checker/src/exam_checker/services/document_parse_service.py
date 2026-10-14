@@ -15,7 +15,7 @@ from ..integrations.mineru_agent import (
 )
 from ..parsing.normalizer import ExamDocumentNormalizer
 from ..parsing.structure_extractor import StructureExtractor
-from .document_store import InMemoryExamDocumentStore
+from .document_store import ExamDocumentStore
 
 
 class UnsupportedDocumentError(ValueError):
@@ -29,7 +29,7 @@ class DocumentParseService:
         mineru: MinerUAgentClient,
         structure_extractor: StructureExtractor,
         normalizer: ExamDocumentNormalizer,
-        store: InMemoryExamDocumentStore,
+        store: ExamDocumentStore,
         word_converter: LibreOfficeConverter,
     ) -> None:
         self.mineru = mineru

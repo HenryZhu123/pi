@@ -19,6 +19,7 @@ from ..domain.models import (
     SpecialistReviewResult,
 )
 from ..prompts.repositories import JevPromptRepository
+from .persistence import QuestionReviewRepository
 
 
 ALL_REVIEW_TASKS: tuple[ReviewTaskId, ...] = (
@@ -57,10 +58,12 @@ class QuestionReviewService:
         router: JevRouter,
         reviewer: SpecialistReviewer,
         jev_prompts: JevPromptRepository,
+        review_repository: QuestionReviewRepository | None = None,
     ) -> None:
         self.router = router
         self.reviewer = reviewer
         self.jev_prompts = jev_prompts
+        self.review_repository = review_repository
         self.routed_tasks = frozenset(jev_prompts.task_ids)
         unexpected = self.routed_tasks - set(ALL_REVIEW_TASKS)
         if unexpected:
@@ -83,9 +86,7 @@ class QuestionReviewService:
         checks = [outcome[0] for outcome in outcomes]
         routing = {
             task_id: decision
-            for task_id, (_, decision) in zip(
-                ALL_REVIEW_TASKS, outcomes, strict=True
-            )
+            for task_id, (_, decision) in zip(ALL_REVIEW_TASKS, outcomes, strict=True)
             if decision is not None
         }
         errors = self._deduplicate_errors(
@@ -95,9 +96,7 @@ class QuestionReviewService:
             for error in check.result.errors
         )
         unresolved = [
-            check.task_id
-            for check in checks
-            if check.execution_status == "FAILED"
+            check.task_id for check in checks if check.execution_status == "FAILED"
         ]
         if unresolved:
             status = "UNRESOLVED"
@@ -117,7 +116,7 @@ class QuestionReviewService:
             ),
             default=0,
         )
-        return ReviewedQuestion(
+        review = ReviewedQuestion(
             document_id=document_id,
             question_id=question_id,
             question_number=question_number,
@@ -139,6 +138,9 @@ class QuestionReviewService:
                 ),
             ),
         )
+        if self.review_repository is not None:
+            await self.review_repository.save(review)
+        return review
 
     async def _run_task(
         self, task_id: ReviewTaskId, payload: CheckerPayload
@@ -152,9 +154,7 @@ class QuestionReviewService:
             prediction = await self.router.predict(task_id, payload)
             decision = RoutingDecision(
                 decision=(
-                    "SKIP"
-                    if prediction.p_skip >= prompt.skip_threshold
-                    else "RUN"
+                    "SKIP" if prediction.p_skip >= prompt.skip_threshold else "RUN"
                 ),
                 p_run=prediction.p_run,
                 p_skip=prediction.p_skip,

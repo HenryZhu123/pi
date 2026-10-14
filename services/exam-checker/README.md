@@ -12,6 +12,7 @@ Pipeline:
 6. Build a per-question checker payload.
 7. Run Jev-gated and direct specialist checks concurrently.
 8. Aggregate all nine error types into one question review result.
+9. Persist parsed documents and full review JSON in PostgreSQL when configured.
 
 ## Run
 
@@ -25,6 +26,24 @@ cp .env.example .env
 
 Environment variables are not loaded from `.env` automatically. Export them in the shell or use your process manager.
 
+## PostgreSQL persistence
+
+Set `EXAM_CHECKER_DATABASE_URL` and run the migration before starting the service:
+
+```bash
+cd services/exam-checker
+alembic upgrade head
+```
+
+The schema stores complete JSON in PostgreSQL `JSONB` columns:
+
+- `exam_documents`: one complete `ExamDocument` per parsed file.
+- `question_reviews`: one append-only complete `ReviewedQuestion` per review run.
+- `question_bank`: one complete, metadata-enriched question JSON per accepted question.
+
+No optional business indexes are created yet. Primary key and uniqueness constraints
+still use PostgreSQL's required internal indexes.
+
 ## API
 
 - `POST /v1/exam-checker/documents/parse`
@@ -34,6 +53,13 @@ Environment variables are not loaded from `.env` automatically. Export them in t
 - `GET /v1/exam-checker/documents/{document_id}/questions/{question_id}/checker-payload`
 - `POST /v1/exam-checker/documents/{document_id}/review`
 - `POST /v1/exam-checker/documents/{document_id}/questions/{question_id}/review`
+- `POST /v1/exam-checker/documents/{document_id}/questions/{question_id}/ingest`
+
+The ingestion endpoint requires the latest persisted review to be `PASS`. Its JSON body
+must contain the matching `question_id`, `review_status: "PASS"`, a non-empty
+`question_content`, `difficulty`, and a non-empty `knowledge_points` string array. The
+service stores the complete body and adds the final `ingestion` result with the generated
+`record_id`.
 
 The MinerU Agent API accepts files up to 10 MB and PDFs up to 20 pages. It is IP-rate-limited and returns only Markdown.
 
