@@ -12,10 +12,13 @@ interface RegisteredExamCheckerTool {
 	execute: (
 		toolCallId: string,
 		params: {
-			operation: "review_file" | "review_document" | "review_question";
+			operation: "review_file" | "review_document" | "review_question" | "revise_question";
 			file_path?: string;
 			document_id?: string;
 			question_id?: string;
+			base_version_id?: string;
+			question_json?: Record<string, unknown>;
+			user_instruction?: string;
 		},
 		signal: AbortSignal | undefined,
 		onUpdate: undefined,
@@ -42,7 +45,9 @@ function fullReview(status: "PASS" | "NEEDS_REVISION" | "UNRESOLVED") {
 		document_id: "exam_1",
 		question_id: "question_2",
 		question_number: "2",
+		question_version_id: "00000000-0000-0000-0000-000000000002",
 		question: { reference: "ignored", detection_content: "ignored" },
+		ingestion: undefined as { status: "STORED" | "FAILED" | "SKIPPED"; record_id?: string } | undefined,
 		review: {
 			status,
 			routing: { options_check: { p_skip: 0.99 } },
@@ -58,14 +63,15 @@ describe("compactReviewResult", () => {
 		const result = compactReviewResult(fullReview("PASS"));
 
 		expect(result).toEqual({
+			document_id: "exam_1",
 			question_id: "question_2",
 			question_number: "2",
+			question_version_id: "00000000-0000-0000-0000-000000000002",
 			status: "PASS",
 			errors: [],
 			unresolved_checks: [],
 		});
 		expect(result).not.toHaveProperty("ingestion");
-		expect(result).not.toHaveProperty("document_id");
 	});
 
 	it("removes empty and audit-only fields from reported errors", () => {
@@ -135,15 +141,19 @@ describe("compactReviewResult", () => {
 			status: "NEEDS_REVISION",
 			questions: [
 				{
+					document_id: "exam_1",
 					question_id: "question_2",
 					question_number: "2",
+					question_version_id: "00000000-0000-0000-0000-000000000002",
 					status: "PASS",
 					errors: [],
 					unresolved_checks: [],
 				},
 				{
+					document_id: "exam_1",
 					question_id: "question_3",
 					question_number: "3",
+					question_version_id: "00000000-0000-0000-0000-000000000002",
 					status: "NEEDS_REVISION",
 					errors: [],
 					unresolved_checks: [],
@@ -202,6 +212,48 @@ describe("compactReviewResult", () => {
 			"http://127.0.0.1:8091/v1/exam-checker/documents/exam_1/questions/question_2/review",
 			expect.objectContaining({ method: "POST" }),
 		);
+	});
+
+	it("routes revise_question with the version and user instruction", async () => {
+		const response = fullReview("PASS");
+		response.ingestion = { status: "STORED", record_id: "record_1" };
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(JSON.stringify(response), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			}),
+		);
+
+		const result = await registeredTool().execute(
+			"call_revise",
+			{
+				operation: "revise_question",
+				document_id: "exam_1",
+				question_id: "question_2",
+				base_version_id: "00000000-0000-0000-0000-000000000002",
+				user_instruction: "保持原考点，修正选项 C",
+			},
+			undefined,
+			undefined,
+			{ cwd: "/workspace" },
+		);
+
+		expect(fetchMock).toHaveBeenCalledWith(
+			"http://127.0.0.1:8091/v1/exam-checker/documents/exam_1/questions/question_2/revise",
+			expect.objectContaining({
+				method: "POST",
+				body: JSON.stringify({
+					base_version_id: "00000000-0000-0000-0000-000000000002",
+					user_instruction: "保持原考点，修正选项 C",
+				}),
+			}),
+		);
+		expect(JSON.parse(result.content[0]?.text ?? "{}")).toMatchObject({
+			document_id: "exam_1",
+			question_id: "question_2",
+			status: "PASS",
+			ingestion: { status: "STORED", record_id: "record_1" },
+		});
 	});
 
 	it("parses review_file once and then reviews the parsed document", async () => {

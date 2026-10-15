@@ -47,6 +47,13 @@ class Settings:
     jev_timeout_seconds: float
     jev_max_concurrency: int
     jev_prompt_root: str
+    workflow_llm_base_url: str
+    workflow_llm_api_key: str
+    workflow_llm_model: str
+    workflow_llm_timeout_seconds: float
+    workflow_llm_max_concurrency: int
+    revision_prompt_root: str
+    metadata_prompt_root: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -121,5 +128,30 @@ class Settings:
             jev_prompt_root=os.getenv(
                 "EXAM_CHECKER_JEV_PROMPT_ROOT",
                 str(default_prompt_root / "jev-prompt"),
+            ).strip(),
+            workflow_llm_base_url=(
+                os.getenv("EXAM_CHECKER_WORKFLOW_LLM_BASE_URL", llm_base_url)
+                .strip()
+                .rstrip("/")
+            ),
+            workflow_llm_api_key=os.getenv(
+                "EXAM_CHECKER_WORKFLOW_LLM_API_KEY", llm_api_key
+            ).strip(),
+            workflow_llm_model=os.getenv(
+                "EXAM_CHECKER_WORKFLOW_LLM_MODEL", llm_model
+            ).strip(),
+            workflow_llm_timeout_seconds=_positive_float(
+                "EXAM_CHECKER_WORKFLOW_LLM_TIMEOUT_SECONDS", 180
+            ),
+            workflow_llm_max_concurrency=_positive_int(
+                "EXAM_CHECKER_WORKFLOW_LLM_MAX_CONCURRENCY", 8
+            ),
+            revision_prompt_root=os.getenv(
+                "EXAM_CHECKER_REVISION_PROMPT_ROOT",
+                str(default_prompt_root / "question-revision-prompt"),
+            ).strip(),
+            metadata_prompt_root=os.getenv(
+                "EXAM_CHECKER_METADATA_PROMPT_ROOT",
+                str(default_prompt_root / "question-metadata-prompt"),
             ).strip(),
         )

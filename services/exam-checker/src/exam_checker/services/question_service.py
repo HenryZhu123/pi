@@ -65,6 +65,10 @@ class QuestionService:
         self, document: ExamDocument, question_id: str
     ) -> CheckerPayload:
         question = self.get_question(document, question_id)
+        return self.to_checker_payload_from_view(question)
+
+    @staticmethod
+    def to_checker_payload_from_view(question: QuestionView) -> CheckerPayload:
         reference_parts = [
             f"【学科】{question.subject}" if question.subject else "",
             f"【试卷标题】{question.paper_title}" if question.paper_title else "",

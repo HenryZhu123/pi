@@ -5,10 +5,15 @@ import type { ExtensionAPI } from "../../core/extensions/types.ts";
 
 const examCheckerParameters = Type.Object({
 	operation: Type.Union(
-		[Type.Literal("review_file"), Type.Literal("review_document"), Type.Literal("review_question")],
+		[
+			Type.Literal("review_file"),
+			Type.Literal("review_document"),
+			Type.Literal("review_question"),
+			Type.Literal("revise_question"),
+		],
 		{
 			description:
-				"Choose review_file for an original PDF/DOC/DOCX, review_document for every question in a parsed document, or review_question for one parsed question.",
+				"Choose review_file for an original PDF/DOC/DOCX, review_document for every question in a parsed document, review_question for one parsed question, or revise_question to modify and re-review one question.",
 		},
 	),
 	file_path: Type.Optional(
@@ -17,7 +22,20 @@ const examCheckerParameters = Type.Object({
 	document_id: Type.Optional(
 		Type.String({ description: "Parsed exam document ID. Required for review_document and review_question." }),
 	),
-	question_id: Type.Optional(Type.String({ description: "Question node ID. Required only for review_question." })),
+	question_id: Type.Optional(
+		Type.String({ description: "Question node ID. Required for review_question and revise_question." }),
+	),
+	base_version_id: Type.Optional(
+		Type.String({ description: "Version ID returned by the latest review. Required for revise_question." }),
+	),
+	question_json: Type.Optional(
+		Type.Record(Type.String(), Type.Unknown(), {
+			description: "Complete user-edited single-question JSON. Optional for revise_question.",
+		}),
+	),
+	user_instruction: Type.Optional(
+		Type.String({ description: "Optional user instruction for the question revision model." }),
+	),
 });
 
 export type ExamCheckerStatus = "PASS" | "NEEDS_REVISION" | "UNRESOLVED";
@@ -46,12 +64,13 @@ export interface IngestionResult {
 }
 
 export interface CompactExamCheckerResult {
+	document_id: string;
 	question_id: string;
 	question_number: string;
+	question_version_id?: string;
 	status: ExamCheckerStatus;
 	errors: CompactReviewError[];
 	unresolved_checks: UnresolvedCheck[];
-	/** Reserved for a later storage phase. The current exam_checker tool never emits it. */
 	ingestion?: IngestionResult;
 }
 
@@ -135,6 +154,17 @@ function compactUnresolvedCheck(value: unknown): UnresolvedCheck | undefined {
 	};
 }
 
+function compactIngestion(value: unknown): IngestionResult | undefined {
+	if (!isRecord(value)) return undefined;
+	const status = value.status;
+	if (status !== "STORED" && status !== "FAILED" && status !== "SKIPPED") return undefined;
+	return {
+		status,
+		...(optionalString(value, "record_id") ? { record_id: optionalString(value, "record_id") } : {}),
+		...(optionalString(value, "error_code") ? { error_code: optionalString(value, "error_code") } : {}),
+	};
+}
+
 export function compactReviewResult(value: unknown): CompactExamCheckerResult {
 	if (!isRecord(value) || !isRecord(value.review)) {
 		throw new ExamCheckerToolError("INVALID_EXAM_CHECKER_RESPONSE");
@@ -147,12 +177,18 @@ export function compactReviewResult(value: unknown): CompactExamCheckerResult {
 	const unresolvedChecks = review.checks
 		.map(compactUnresolvedCheck)
 		.filter((check): check is UnresolvedCheck => check !== undefined);
+	const ingestion = compactIngestion(value.ingestion);
 	return {
+		document_id: requiredString(value, "document_id"),
 		question_id: requiredString(value, "question_id"),
 		question_number: requiredString(value, "question_number"),
+		...(optionalString(value, "question_version_id")
+			? { question_version_id: optionalString(value, "question_version_id") }
+			: {}),
 		status: reviewStatus(review),
 		errors: review.summary.errors.map(compactError),
 		unresolved_checks: unresolvedChecks,
+		...(ingestion ? { ingestion } : {}),
 	};
 }
 
@@ -188,7 +224,7 @@ async function requestJson(url: string, init: RequestInit): Promise<unknown> {
 	}
 }
 
-function requireOnly(value: string | undefined, forbidden: Array<string | undefined>): string {
+function requireOnly(value: string | undefined, forbidden: unknown[]): string {
 	if (!value || forbidden.some((item) => item !== undefined)) {
 		throw new ExamCheckerToolError("INVALID_EXAM_CHECKER_INPUT");
 	}
@@ -200,11 +236,12 @@ export default function examCheckerExtension(pi: ExtensionAPI): void {
 		name: "exam_checker",
 		label: "exam checker",
 		description:
-			"Run the exam-checker workflow for an original PDF/DOC/DOCX file, every question in a parsed exam, or one parsed question.",
-		promptSnippet: "Parse and review exam files, parsed exams, or individual parsed questions",
+			"Run the exam-checker workflow to parse and review exams, review one question, or revise and re-review one question.",
+		promptSnippet: "Parse, review, or revise exam questions through the exam-checker workflow",
 		promptGuidelines: [
-			"Use exam_checker with review_file when the user provides an original PDF, DOC, or DOCX file; use review_document for every question in an existing document_id; use review_question only when both document_id and question_id identify one question.",
-			"Treat exam_checker.status as the sole review decision: PASS may continue to a later ingestion flow; NEEDS_REVISION must be returned to the user with the reported errors; UNRESOLVED means review is incomplete.",
+			"Use review_file for an original PDF, DOC, or DOCX; review_document for every question in a document_id; review_question for one document_id and question_id; revise_question only after a review, using its document_id, question_id, and question_version_id as base_version_id.",
+			"For revise_question, pass a complete user-edited question_json when the user supplied the replacement; otherwise pass the user's revision request as user_instruction so the service can apply the recorded review errors.",
+			"Treat exam_checker.status as the sole review decision: PASS is eligible for automatic ingestion; NEEDS_REVISION must be returned to the user with the reported errors; UNRESOLVED means review is incomplete.",
 			"For UNRESOLVED results, report unresolved_checks and never claim that the question or document passed.",
 			"Do not override exam_checker.status or invent errors that are absent from its result.",
 		],
@@ -212,8 +249,37 @@ export default function examCheckerExtension(pi: ExtensionAPI): void {
 		executionMode: "parallel",
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			try {
-				if (params.operation === "review_question") {
+				if (params.operation === "revise_question") {
 					const documentId = requireOnly(params.document_id, [params.file_path]);
+					if (!params.question_id || !params.base_version_id) {
+						throw new ExamCheckerToolError("INVALID_EXAM_CHECKER_INPUT");
+					}
+					const fullReview = await requestJson(
+						`${serviceUrl()}/v1/exam-checker/documents/${encodeURIComponent(documentId)}/questions/${encodeURIComponent(params.question_id)}/revise`,
+						{
+							method: "POST",
+							headers: { "content-type": "application/json" },
+							body: JSON.stringify({
+								base_version_id: params.base_version_id,
+								...(params.question_json ? { question_json: params.question_json } : {}),
+								user_instruction: params.user_instruction ?? "",
+							}),
+							signal,
+						},
+					);
+					return {
+						content: [{ type: "text", text: JSON.stringify(compactReviewResult(fullReview)) }],
+						details: { fullReview },
+					};
+				}
+
+				if (params.operation === "review_question") {
+					const documentId = requireOnly(params.document_id, [
+						params.file_path,
+						params.base_version_id,
+						params.question_json,
+						params.user_instruction,
+					]);
 					if (!params.question_id) throw new ExamCheckerToolError("INVALID_EXAM_CHECKER_INPUT");
 					const fullReview = await requestJson(
 						`${serviceUrl()}/v1/exam-checker/documents/${encodeURIComponent(documentId)}/questions/${encodeURIComponent(params.question_id)}/review`,
@@ -228,7 +294,13 @@ export default function examCheckerExtension(pi: ExtensionAPI): void {
 				let documentId: string;
 				let parsedDocument: unknown;
 				if (params.operation === "review_file") {
-					const filePath = requireOnly(params.file_path, [params.document_id, params.question_id]);
+					const filePath = requireOnly(params.file_path, [
+						params.document_id,
+						params.question_id,
+						params.base_version_id,
+						params.question_json,
+						params.user_instruction,
+					]);
 					const absolutePath = resolve(ctx.cwd, filePath);
 					let bytes: Uint8Array;
 					try {
@@ -248,7 +320,13 @@ export default function examCheckerExtension(pi: ExtensionAPI): void {
 					}
 					documentId = requiredString(parsedDocument, "document_id");
 				} else {
-					documentId = requireOnly(params.document_id, [params.file_path, params.question_id]);
+					documentId = requireOnly(params.document_id, [
+						params.file_path,
+						params.question_id,
+						params.base_version_id,
+						params.question_json,
+						params.user_instruction,
+					]);
 				}
 
 				const fullReview = await requestJson(

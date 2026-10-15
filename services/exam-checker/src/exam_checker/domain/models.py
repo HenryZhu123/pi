@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -142,6 +142,16 @@ class QuestionView(StrictModel):
     reference: str
 
 
+class StoredQuestionVersion(StrictModel):
+    version_id: str
+    document_id: str
+    question_id: str
+    version_number: int = Field(ge=1)
+    parent_version_id: str | None = None
+    revision_source: Literal["PARSED", "AI_EDIT", "USER_EDIT"]
+    question: QuestionView
+
+
 class CheckerPayload(StrictModel):
     reference: str
     detection_content: str
@@ -243,12 +253,21 @@ class QuestionReview(StrictModel):
     timing_ms: ReviewTiming
 
 
+class IngestionResult(StrictModel):
+    status: Literal["STORED", "FAILED", "SKIPPED"]
+    record_id: str | None = None
+    error_code: str | None = None
+
+
 class ReviewedQuestion(StrictModel):
     document_id: str
     question_id: str
     question_number: str
+    question_version_id: str | None = None
+    review_id: str | None = None
     question: CheckerPayload
     review: QuestionReview
+    ingestion: IngestionResult | None = None
 
 
 class ReviewedDocument(StrictModel):
@@ -257,6 +276,12 @@ class ReviewedDocument(StrictModel):
     questions: list[ReviewedQuestion]
 
 
-class IngestionResult(StrictModel):
-    status: Literal["STORED"] = "STORED"
-    record_id: str
+class QuestionMetadata(StrictModel):
+    difficulty: Literal["easy", "medium", "hard"]
+    knowledge_points: list[str] = Field(min_length=1, max_length=8)
+
+
+class ReviseQuestionRequest(StrictModel):
+    base_version_id: str
+    question_json: dict[str, Any] | None = None
+    user_instruction: str = ""

@@ -12,7 +12,8 @@ Pipeline:
 6. Build a per-question checker payload.
 7. Run Jev-gated and direct specialist checks concurrently.
 8. Aggregate all nine error types into one question review result.
-9. Persist parsed documents and full review JSON in PostgreSQL when configured.
+9. Create an immutable question version and persist each full review in PostgreSQL.
+10. For passed questions, generate difficulty and knowledge points and store the complete question JSON in the question bank.
 
 ## Run
 
@@ -38,6 +39,7 @@ alembic upgrade head
 The schema stores complete JSON in PostgreSQL `JSONB` columns:
 
 - `exam_documents`: one complete `ExamDocument` per parsed file.
+- `question_versions`: immutable complete single-question JSON; parsing creates version 1 and every edit appends a version.
 - `question_reviews`: one append-only complete `ReviewedQuestion` per review run.
 - `question_bank`: one complete, metadata-enriched question JSON per accepted question.
 
@@ -53,13 +55,20 @@ still use PostgreSQL's required internal indexes.
 - `GET /v1/exam-checker/documents/{document_id}/questions/{question_id}/checker-payload`
 - `POST /v1/exam-checker/documents/{document_id}/review`
 - `POST /v1/exam-checker/documents/{document_id}/questions/{question_id}/review`
+- `POST /v1/exam-checker/documents/{document_id}/questions/{question_id}/revise`
 - `POST /v1/exam-checker/documents/{document_id}/questions/{question_id}/ingest`
 
 The ingestion endpoint requires the latest persisted review to be `PASS`. Its JSON body
-must contain the matching `question_id`, `review_status: "PASS"`, a non-empty
-`question_content`, `difficulty`, and a non-empty `knowledge_points` string array. The
-service stores the complete body and adds the final `ingestion` result with the generated
-`record_id`.
+must contain the matching `document_id`, `question_id`, `review_status: "PASS"`, a
+complete `question` JSON object, and `metadata` containing `difficulty` and a non-empty
+`knowledge_points` string array. The normal review workflow performs this ingestion
+automatically after a passed review.
+
+The revision endpoint requires `base_version_id`. It accepts either a complete user-edited
+`question_json` or `user_instruction`. AI revision receives the complete latest question
+JSON, the latest review's `errors`, and the user instruction without converting the question
+to another schema. It then creates a new version and runs all nine checks again. A stale
+`base_version_id` returns HTTP 409 instead of overwriting a newer edit.
 
 The MinerU Agent API accepts files up to 10 MB and PDFs up to 20 pages. It is IP-rate-limited and returns only Markdown.
 
@@ -122,22 +131,25 @@ The response separates whole-question state from per-task execution:
 }
 ```
 
-`PASS` requires every non-skipped check to complete. Any specialist failure produces `UNRESOLVED`; detected errors produce `NEEDS_REVISION`. Knowledge-point and difficulty annotation are not part of this phase.
+`PASS` requires every non-skipped check to complete. Any specialist failure produces `UNRESOLVED`; detected errors produce `NEEDS_REVISION`. Difficulty and knowledge points are generated only after this review phase returns `PASS`.
 
 ## Pi tool result
 
-Set `EXAM_CHECKER_SERVICE_URL` when the service is not available at `http://127.0.0.1:8091`. The built-in `exam_checker` tool exposes three operations:
+Set `EXAM_CHECKER_SERVICE_URL` when the service is not available at `http://127.0.0.1:8091`. The built-in `exam_checker` tool exposes four operations:
 
 - `review_file`: accepts `file_path`, parses the original PDF/DOC/DOCX once, then reviews every extracted question.
 - `review_document`: accepts `document_id` and reviews every question without repeating MinerU parsing.
 - `review_question`: accepts `document_id` and `question_id` and reviews only that question.
+- `revise_question`: accepts `document_id`, `question_id`, `base_version_id`, and either a complete `question_json` or `user_instruction`; it creates a new version and re-reviews it.
 
 The operation parameters are mutually exclusive. The tool keeps the full response in tool details for audit and sends only decision-relevant JSON to the model:
 
 ```json
 {
+  "document_id": "exam_123",
   "question_id": "question_2",
   "question_number": "2",
+  "question_version_id": "5aa36f56-1ab8-4d18-b377-d0c89ac41116",
   "status": "NEEDS_REVISION",
   "errors": [
     {
@@ -153,4 +165,4 @@ The operation parameters are mutually exclusive. The tool keeps the full respons
 }
 ```
 
-`status` is the sole workflow decision. `PASS` may proceed to a later ingestion phase, `NEEDS_REVISION` must be returned with correction guidance, and `UNRESOLVED` means one or more checks failed after retry. The result type reserves an optional `ingestion` field for the later storage phase, but the current tool does not emit it.
+`status` is the sole review decision. `NEEDS_REVISION` must be returned with correction guidance, and `UNRESOLVED` means one or more checks failed after retry. A passed question also includes `ingestion`: `STORED` contains its question-bank `record_id`; `FAILED` reports the storage-stage error code; `SKIPPED` is used when PostgreSQL is not configured.

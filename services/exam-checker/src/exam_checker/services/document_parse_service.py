@@ -16,6 +16,8 @@ from ..integrations.mineru_agent import (
 from ..parsing.normalizer import ExamDocumentNormalizer
 from ..parsing.structure_extractor import StructureExtractor
 from .document_store import ExamDocumentStore
+from .persistence import QuestionVersionRepository
+from .question_service import QuestionService
 
 
 class UnsupportedDocumentError(ValueError):
@@ -31,12 +33,16 @@ class DocumentParseService:
         normalizer: ExamDocumentNormalizer,
         store: ExamDocumentStore,
         word_converter: LibreOfficeConverter,
+        question_service: QuestionService | None = None,
+        version_repository: QuestionVersionRepository | None = None,
     ) -> None:
         self.mineru = mineru
         self.structure_extractor = structure_extractor
         self.normalizer = normalizer
         self.store = store
         self.word_converter = word_converter
+        self.question_service = question_service
+        self.version_repository = version_repository
 
     async def parse(self, file_bytes: bytes, file_name: str) -> ExamDocument:
         safe_name = Path(file_name).name
@@ -74,6 +80,10 @@ class DocumentParseService:
             markdown=extracted.markdown,
         )
         await self.store.save(document)
+        if self.version_repository is not None and self.question_service is not None:
+            await self.version_repository.initialize(
+                self.question_service.list_questions(document)
+            )
         return document
 
     @staticmethod

@@ -9,6 +9,10 @@ from exam_checker.integrations.mineru_agent import ExtractedDocument, MinerULimi
 from exam_checker.parsing.normalizer import ExamDocumentNormalizer
 from exam_checker.services.document_parse_service import DocumentParseService
 from exam_checker.services.document_store import InMemoryExamDocumentStore
+from exam_checker.services.question_service import QuestionService
+from exam_checker.services.question_version_store import (
+    InMemoryQuestionVersionRepository,
+)
 
 
 def make_pdf(page_count: int = 1) -> bytes:
@@ -58,12 +62,15 @@ class UnexpectedWordConverter:
 async def test_parse_service_builds_and_stores_exam_document() -> None:
     mineru = FakeMinerU()
     store = InMemoryExamDocumentStore()
+    versions = InMemoryQuestionVersionRepository()
     service = DocumentParseService(
         mineru=mineru,
         structure_extractor=FakeExtractor(),
         normalizer=ExamDocumentNormalizer(),
         store=store,
         word_converter=UnexpectedWordConverter(),
+        question_service=QuestionService(),
+        version_repository=versions,
     )
 
     document = await service.parse(make_pdf(), "exam.pdf")
@@ -72,6 +79,10 @@ async def test_parse_service_builds_and_stores_exam_document() -> None:
     assert document.paper.subject == "计算机"
     assert document.nodes["question_1"].question_text == "测试题"
     assert await store.get(document.document_id) == document
+    version = await versions.get_latest(document.document_id, "question_1")
+    assert version.version_number == 1
+    assert version.revision_source == "PARSED"
+    assert version.question.question_text == "测试题"
 
 
 @pytest.mark.asyncio

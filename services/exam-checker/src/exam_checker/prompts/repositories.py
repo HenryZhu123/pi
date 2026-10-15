@@ -153,3 +153,19 @@ class ReviewPromptRepository:
         if not text:
             raise PromptConfigurationError(f"Prompt file is empty: {path}")
         return text
+
+
+class SinglePromptRepository:
+    def __init__(self, root: str | Path) -> None:
+        self.path = Path(root) / "system.txt"
+
+    def system_prompt(self) -> str:
+        try:
+            text = self.path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise PromptConfigurationError(
+                f"Cannot read {self.path}: {exc}"
+            ) from exc
+        if not text:
+            raise PromptConfigurationError(f"Prompt file is empty: {self.path}")
+        return text

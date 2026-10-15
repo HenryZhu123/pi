@@ -25,6 +25,7 @@ def make_review(status: str = "PASS") -> ReviewedQuestion:
         document_id="exam_1",
         question_id="question_1",
         question_number="1",
+        question_version_id="00000000-0000-0000-0000-000000000001",
         question=CheckerPayload(reference="", detection_content="测试题"),
         review=QuestionReview(
             status=status,
@@ -70,14 +71,13 @@ async def test_ingest_stores_complete_json_after_passed_review() -> None:
         question_bank_repository=bank_repository,
     )
     question_json = {
+        "document_id": "exam_1",
         "question_id": "question_1",
-        "question_number": "1",
-        "question_content": "测试题",
-        "subject": "计算机",
-        "question_type": "short_answer",
-        "points": 5,
-        "difficulty": "medium",
-        "knowledge_points": ["测试知识点"],
+        "question": {"question_id": "question_1", "question_text": "测试题"},
+        "metadata": {
+            "difficulty": "medium",
+            "knowledge_points": ["测试知识点"],
+        },
         "review_status": "PASS",
     }
 
@@ -90,7 +90,7 @@ async def test_ingest_stores_complete_json_after_passed_review() -> None:
     assert result.status == "STORED"
     assert bank_repository.stored is not None
     stored_json = bank_repository.stored["question_json"]
-    assert stored_json["question_content"] == "测试题"
+    assert stored_json["question"]["question_text"] == "测试题"
     assert stored_json["ingestion"] == {
         "status": "STORED",
         "record_id": result.record_id,
@@ -125,9 +125,10 @@ async def test_ingest_requires_metadata() -> None:
             document_id="exam_1",
             question_id="question_1",
             question_json={
+                "document_id": "exam_1",
                 "question_id": "question_1",
-                "question_content": "测试题",
+                "question": {"question_text": "测试题"},
                 "review_status": "PASS",
-                "knowledge_points": [],
+                "metadata": {"knowledge_points": []},
             },
         )

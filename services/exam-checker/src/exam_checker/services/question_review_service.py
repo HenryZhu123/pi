@@ -4,6 +4,7 @@ import asyncio
 import time
 from collections.abc import Iterable
 from typing import Literal, Protocol
+from uuid import uuid4
 
 from ..domain.models import (
     CheckerPayload,
@@ -76,6 +77,7 @@ class QuestionReviewService:
         question_id: str,
         question_number: str,
         payload: CheckerPayload,
+        question_version_id: str | None = None,
     ) -> ReviewedQuestion:
         started = time.perf_counter()
         tasks = [
@@ -120,6 +122,8 @@ class QuestionReviewService:
             document_id=document_id,
             question_id=question_id,
             question_number=question_number,
+            question_version_id=question_version_id,
+            review_id=str(uuid4()),
             question=payload,
             review=QuestionReview(
                 status=status,

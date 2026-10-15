@@ -69,6 +69,18 @@ class FakeDocumentReviewService:
         )
 
 
+class FakeQuestionWorkflowService:
+    async def review_latest(self, document_id, question_id):
+        document = await app.state.document_store.get(document_id)
+        question = app.state.question_service.get_question(document, question_id)
+        return await FakeReviewService().review_question(
+            document_id=document_id,
+            question_id=question_id,
+            question_number=question.question_number,
+            payload=app.state.question_service.to_checker_payload_from_view(question),
+        )
+
+
 def test_review_endpoint_builds_payload_and_returns_aggregated_review() -> None:
     document = ExamDocumentNormalizer().normalize(
         {
@@ -91,8 +103,8 @@ def test_review_endpoint_builds_payload_and_returns_aggregated_review() -> None:
         provider_task_id="task",
         markdown="text",
     )
-    original_service = app.state.review_service
-    app.state.review_service = FakeReviewService()
+    original_service = app.state.question_workflow_service
+    app.state.question_workflow_service = FakeQuestionWorkflowService()
     asyncio.run(app.state.document_store.save(document))
     try:
         with TestClient(app) as client:
@@ -101,7 +113,7 @@ def test_review_endpoint_builds_payload_and_returns_aggregated_review() -> None:
                 "/questions/question_1/review"
             )
     finally:
-        app.state.review_service = original_service
+        app.state.question_workflow_service = original_service
 
     assert response.status_code == 200
     body = response.json()

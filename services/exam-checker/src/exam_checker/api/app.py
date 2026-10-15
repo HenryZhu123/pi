@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from typing import Any
+from uuid import UUID
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 
@@ -11,12 +12,14 @@ from ..database import (
     PostgresExamDocumentStore,
     PostgresQuestionBankRepository,
     PostgresQuestionReviewRepository,
+    PostgresQuestionVersionRepository,
 )
 from ..domain.models import (
     CheckerPayload,
     ExamDocument,
     IngestionResult,
     QuestionView,
+    ReviseQuestionRequest,
     ReviewedDocument,
     ReviewedQuestion,
 )
@@ -29,19 +32,33 @@ from ..integrations.mineru_agent import (
 )
 from ..integrations.openrouter_decisions import OpenRouterJevClient
 from ..integrations.specialist_reviewer import OpenAICompatibleSpecialistReviewer
+from ..integrations.question_workflow_model import (
+    OpenAICompatibleQuestionWorkflowModel,
+    QuestionWorkflowModelError,
+)
 from ..parsing.normalizer import ExamDocumentNormalizer, NormalizationError
 from ..parsing.structure_extractor import (
     OpenAICompatibleStructureExtractor,
     StructureExtractionError,
 )
-from ..prompts.repositories import JevPromptRepository, ReviewPromptRepository
+from ..prompts.repositories import (
+    JevPromptRepository,
+    ReviewPromptRepository,
+    SinglePromptRepository,
+)
 from ..services.document_parse_service import (
     DocumentParseService,
     UnsupportedDocumentError,
 )
 from ..services.document_review_service import DocumentReviewService
 from ..services.document_store import DocumentNotFoundError, InMemoryExamDocumentStore
-from ..services.persistence import QuestionAlreadyStoredError, ReviewNotFoundError
+from ..services.persistence import (
+    InMemoryQuestionReviewRepository,
+    QuestionAlreadyStoredError,
+    QuestionVersionConflictError,
+    QuestionVersionNotFoundError,
+    ReviewNotFoundError,
+)
 from ..services.question_bank_service import (
     QuestionBankService,
     QuestionBankValidationError,
@@ -49,6 +66,12 @@ from ..services.question_bank_service import (
 )
 from ..services.question_service import QuestionNotFoundError, QuestionService
 from ..services.question_review_service import QuestionReviewService
+from ..services.question_version_store import InMemoryQuestionVersionRepository
+from ..services.question_workflow_service import (
+    QuestionIdentityError,
+    QuestionRevisionNotAllowedError,
+    QuestionWorkflowService,
+)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -68,11 +91,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     database = Database(resolved.database_url) if resolved.database_url else None
     if database is None:
         store = InMemoryExamDocumentStore()
-        review_repository = None
+        review_repository = InMemoryQuestionReviewRepository()
+        version_repository = InMemoryQuestionVersionRepository()
         question_bank_service = None
     else:
         store = PostgresExamDocumentStore(database.sessions)
         review_repository = PostgresQuestionReviewRepository(database.sessions)
+        version_repository = PostgresQuestionVersionRepository(database.sessions)
         question_bank_service = QuestionBankService(
             review_repository=review_repository,
             question_bank_repository=PostgresQuestionBankRepository(database.sessions),
@@ -103,9 +128,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         jev_prompts=jev_prompts,
         review_repository=review_repository,
     )
+    workflow_model = OpenAICompatibleQuestionWorkflowModel(
+        resolved.workflow_llm_base_url,
+        resolved.workflow_llm_api_key,
+        resolved.workflow_llm_model,
+        revision_prompts=SinglePromptRepository(resolved.revision_prompt_root),
+        metadata_prompts=SinglePromptRepository(resolved.metadata_prompt_root),
+        timeout_seconds=resolved.workflow_llm_timeout_seconds,
+        max_concurrency=resolved.workflow_llm_max_concurrency,
+    )
+    question_workflow_service = QuestionWorkflowService(
+        version_repository=version_repository,
+        review_repository=review_repository,
+        review_service=review_service,
+        model=workflow_model,
+        question_bank_service=question_bank_service,
+    )
     document_review_service = DocumentReviewService(
         question_service=question_service,
         question_review_service=review_service,
+        question_workflow_service=question_workflow_service,
     )
     parse_service = DocumentParseService(
         mineru=mineru,
@@ -113,6 +155,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         normalizer=ExamDocumentNormalizer(),
         store=store,
         word_converter=LibreOfficeConverter(),
+        question_service=question_service,
+        version_repository=version_repository,
     )
 
     @asynccontextmanager
@@ -122,6 +166,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await extractor.close()
         await jev_client.close()
         await specialist_reviewer.close()
+        await workflow_model.close()
         if database is not None:
             await database.close()
 
@@ -171,7 +216,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def list_questions(document_id: str) -> list[QuestionView]:
         try:
             document = await store.get(document_id)
-            return question_service.list_questions(document)
+            original = question_service.list_questions(document)
+            return [
+                (
+                    await version_repository.get_latest(
+                        document_id, question.question_id
+                    )
+                ).question
+                for question in original
+            ]
         except DocumentNotFoundError as exc:
             raise HTTPException(status_code=404, detail="Document not found") from exc
 
@@ -181,11 +234,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     async def get_question(document_id: str, question_id: str) -> QuestionView:
         try:
-            document = await store.get(document_id)
-            return question_service.get_question(document, question_id)
+            await store.get(document_id)
+            return (
+                await version_repository.get_latest(document_id, question_id)
+            ).question
         except DocumentNotFoundError as exc:
             raise HTTPException(status_code=404, detail="Document not found") from exc
         except QuestionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Question not found") from exc
+        except QuestionVersionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="Question not found") from exc
 
     @application.get(
@@ -194,11 +251,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     async def get_checker_payload(document_id: str, question_id: str) -> CheckerPayload:
         try:
-            document = await store.get(document_id)
-            return question_service.to_checker_payload(document, question_id)
+            await store.get(document_id)
+            version = await version_repository.get_latest(document_id, question_id)
+            return question_service.to_checker_payload_from_view(version.question)
         except DocumentNotFoundError as exc:
             raise HTTPException(status_code=404, detail="Document not found") from exc
         except QuestionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Question not found") from exc
+        except QuestionVersionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="Question not found") from exc
 
     @application.post(
@@ -220,19 +280,49 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     async def review_question(document_id: str, question_id: str) -> ReviewedQuestion:
         try:
-            document = await store.get(document_id)
-            question = question_service.get_question(document, question_id)
-            payload = question_service.to_checker_payload(document, question_id)
-            return await application.state.review_service.review_question(
-                document_id=document_id,
-                question_id=question_id,
-                question_number=question.question_number,
-                payload=payload,
+            await store.get(document_id)
+            return await application.state.question_workflow_service.review_latest(
+                document_id, question_id
             )
         except DocumentNotFoundError as exc:
             raise HTTPException(status_code=404, detail="Document not found") from exc
         except QuestionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="Question not found") from exc
+        except QuestionVersionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Question not found") from exc
+
+    @application.post(
+        "/v1/exam-checker/documents/{document_id}/questions/{question_id}/revise",
+        response_model=ReviewedQuestion,
+    )
+    async def revise_question(
+        document_id: str,
+        question_id: str,
+        request: ReviseQuestionRequest,
+    ) -> ReviewedQuestion:
+        try:
+            await store.get(document_id)
+            return await application.state.question_workflow_service.revise_and_review(
+                document_id=document_id,
+                question_id=question_id,
+                base_version_id=UUID(request.base_version_id),
+                question_json=request.question_json,
+                user_instruction=request.user_instruction,
+            )
+        except QuestionVersionConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except QuestionRevisionNotAllowedError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (DocumentNotFoundError, QuestionVersionNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail="Question not found") from exc
+        except ReviewNotFoundError as exc:
+            raise HTTPException(
+                status_code=409, detail="Review the question before requesting AI revision"
+            ) from exc
+        except QuestionWorkflowModelError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        except (ValueError, QuestionIdentityError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @application.post(
         "/v1/exam-checker/documents/{document_id}/questions/{question_id}/ingest",
@@ -273,6 +363,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.document_review_service = document_review_service
     application.state.database = database
     application.state.question_bank_service = question_bank_service
+    application.state.question_workflow_service = question_workflow_service
+    application.state.version_repository = version_repository
     return application
 
 
