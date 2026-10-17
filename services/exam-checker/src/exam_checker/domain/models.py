@@ -142,6 +142,29 @@ class QuestionView(StrictModel):
     reference: str
 
 
+class ReviewError(StrictModel):
+    error_type: str
+    position: str = ""
+    original_text: str = ""
+    anchor_text: str = ""
+    correction: str = ""
+    description: str = ""
+    suggestion: str = ""
+    severity: str = ""
+
+
+class QuestionChangeLog(StrictModel):
+    user_instruction: str
+    review_feedback: list[ReviewError]
+    changes: str = Field(min_length=1)
+    model: str
+
+
+class QuestionRevisionResult(StrictModel):
+    question: QuestionView
+    changes: str = Field(min_length=1)
+
+
 class StoredQuestionVersion(StrictModel):
     version_id: str
     document_id: str
@@ -150,6 +173,19 @@ class StoredQuestionVersion(StrictModel):
     parent_version_id: str | None = None
     revision_source: Literal["PARSED", "AI_EDIT", "USER_EDIT"]
     question: QuestionView
+    change_log: QuestionChangeLog | None = None
+
+
+class StoredQuestionBankEntry(StrictModel):
+    record_id: str
+    document_id: str
+    question_id: str
+    source_version_id: str | None = None
+    question_json: dict[str, Any]
+
+
+class QuestionBankSearchResult(StrictModel):
+    questions: list[StoredQuestionBankEntry]
 
 
 class CheckerPayload(StrictModel):
@@ -170,15 +206,28 @@ ReviewTaskId = Literal[
 ]
 
 
-class ReviewError(StrictModel):
-    error_type: str
-    position: str = ""
-    original_text: str = ""
-    anchor_text: str = ""
-    correction: str = ""
-    description: str = ""
-    suggestion: str = ""
-    severity: str = ""
+class QuestionStateReview(StrictModel):
+    status: Literal["NOT_REVIEWED", "PASS", "NEEDS_REVISION", "UNRESOLVED"]
+    review_id: str | None = None
+    errors: list[ReviewError] = Field(default_factory=list)
+    unresolved_checks: list[ReviewTaskId] = Field(default_factory=list)
+
+
+class QuestionBankState(StrictModel):
+    status: Literal["STORED", "OUTDATED", "NOT_STORED", "NOT_CONFIGURED"]
+    record_id: str | None = None
+
+
+class QuestionState(StrictModel):
+    document_id: str
+    question_id: str
+    question_version_id: str
+    version_number: int = Field(ge=1)
+    revision_source: Literal["PARSED", "AI_EDIT", "USER_EDIT"]
+    question: QuestionView
+    change_log: QuestionChangeLog | None = None
+    review: QuestionStateReview
+    question_bank: QuestionBankState
 
 
 class SpecialistReviewResult(StrictModel):

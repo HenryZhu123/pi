@@ -11,6 +11,7 @@ from exam_checker.domain.models import (
     ReviewedQuestion,
     ReviewSummary,
     ReviewTiming,
+    StoredQuestionBankEntry,
 )
 from exam_checker.services.persistence import StoredQuestionReview
 from exam_checker.services.question_bank_service import (
@@ -59,8 +60,36 @@ class FakeReviewRepository:
 class FakeQuestionBankRepository:
     stored: dict[str, Any] | None = None
 
+    def __init__(self) -> None:
+        self.entry = StoredQuestionBankEntry(
+            record_id=str(uuid4()),
+            document_id="exam_1",
+            question_id="question_1",
+            question_json={"question": {"question_text": "测试题"}},
+        )
+
     async def store(self, **values: Any) -> None:
         self.stored = values
+
+    async def get(self, record_id: UUID) -> StoredQuestionBankEntry:
+        assert str(record_id) == self.entry.record_id
+        return self.entry
+
+    async def get_by_source(
+        self, document_id: str, question_id: str
+    ) -> StoredQuestionBankEntry | None:
+        return self.entry
+
+    async def search(self, **filters: Any) -> list[StoredQuestionBankEntry]:
+        assert filters == {
+            "subject": "Computer Science",
+            "question_type": "single_choice",
+            "difficulty": "medium",
+            "knowledge_point": "TCP",
+            "keyword": "可靠",
+            "limit": 10,
+        }
+        return [self.entry]
 
 
 @pytest.mark.asyncio
@@ -132,3 +161,25 @@ async def test_ingest_requires_metadata() -> None:
                 "metadata": {"knowledge_points": []},
             },
         )
+
+
+@pytest.mark.asyncio
+async def test_read_and_search_return_complete_stored_json() -> None:
+    repository = FakeQuestionBankRepository()
+    service = QuestionBankService(
+        review_repository=FakeReviewRepository(make_review()),
+        question_bank_repository=repository,
+    )
+
+    entry = await service.get(UUID(repository.entry.record_id))
+    result = await service.search(
+        subject="Computer Science",
+        question_type="single_choice",
+        difficulty="medium",
+        knowledge_point="TCP",
+        keyword="可靠",
+        limit=10,
+    )
+
+    assert entry.question_json == {"question": {"question_text": "测试题"}}
+    assert result.questions == [entry]

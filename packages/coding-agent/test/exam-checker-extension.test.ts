@@ -12,7 +12,7 @@ interface RegisteredExamCheckerTool {
 	execute: (
 		toolCallId: string,
 		params: {
-			operation: "review_file" | "review_document" | "review_question" | "revise_question";
+			operation: "review_file" | "review_document" | "review_question" | "revise_question" | "get_question_state";
 			file_path?: string;
 			document_id?: string;
 			question_id?: string;
@@ -30,10 +30,39 @@ function registeredTool(): RegisteredExamCheckerTool {
 	let tool: unknown;
 	examCheckerExtension({
 		registerTool: (definition: unknown) => {
-			tool = definition;
+			if ((definition as { name?: string }).name === "exam_checker") tool = definition;
 		},
 	} as unknown as ExtensionAPI);
 	return tool as RegisteredExamCheckerTool;
+}
+
+interface RegisteredQuestionBankTool {
+	execute: (
+		toolCallId: string,
+		params: {
+			operation: "get_question" | "search_questions";
+			record_id?: string;
+			subject?: string;
+			question_type?: string;
+			difficulty?: "easy" | "medium" | "hard";
+			knowledge_point?: string;
+			keyword?: string;
+			limit?: number;
+		},
+		signal: AbortSignal | undefined,
+		onUpdate: undefined,
+		ctx: { cwd: string },
+	) => Promise<{ content: Array<{ type: string; text?: string }>; isError?: boolean }>;
+}
+
+function registeredQuestionBankTool(): RegisteredQuestionBankTool {
+	let tool: unknown;
+	examCheckerExtension({
+		registerTool: (definition: unknown) => {
+			if ((definition as { name?: string }).name === "question_bank") tool = definition;
+		},
+	} as unknown as ExtensionAPI);
+	return tool as RegisteredQuestionBankTool;
 }
 
 afterEach(() => {
@@ -214,6 +243,40 @@ describe("compactReviewResult", () => {
 		);
 	});
 
+	it("reads the latest question workflow state", async () => {
+		const state = {
+			document_id: "exam_1",
+			question_id: "question_2",
+			question_version_id: "version_2",
+			version_number: 2,
+			revision_source: "AI_EDIT",
+			question: { question_text: "测试题" },
+			change_log: null,
+			review: { status: "NEEDS_REVISION", errors: [], unresolved_checks: [] },
+			question_bank: { status: "NOT_STORED", record_id: null },
+		};
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(JSON.stringify(state), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			}),
+		);
+
+		const result = await registeredTool().execute(
+			"call_state",
+			{ operation: "get_question_state", document_id: "exam_1", question_id: "question_2" },
+			undefined,
+			undefined,
+			{ cwd: "/workspace" },
+		);
+
+		expect(fetchMock).toHaveBeenCalledWith(
+			"http://127.0.0.1:8091/v1/exam-checker/documents/exam_1/questions/question_2/state",
+			expect.objectContaining({ method: "GET" }),
+		);
+		expect(JSON.parse(result.content[0]?.text ?? "{}")).toEqual(state);
+	});
+
 	it("routes revise_question with the version and user instruction", async () => {
 		const response = fullReview("PASS");
 		response.ingestion = { status: "STORED", record_id: "record_1" };
@@ -322,5 +385,69 @@ describe("compactReviewResult", () => {
 		expect(fetchMock).not.toHaveBeenCalled();
 		expect(result.isError).toBe(true);
 		expect(JSON.parse(result.content[0]?.text ?? "{}")).toEqual({ error: "INVALID_EXAM_CHECKER_INPUT" });
+	});
+
+	it("gets one complete stored question by record ID", async () => {
+		const entry = {
+			record_id: "record_1",
+			document_id: "exam_1",
+			question_id: "question_2",
+			question_json: { question: { question_text: "TCP 题目" }, metadata: { difficulty: "medium" } },
+		};
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(JSON.stringify(entry), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			}),
+		);
+
+		const result = await registeredQuestionBankTool().execute(
+			"call_bank_get",
+			{ operation: "get_question", record_id: "record_1" },
+			undefined,
+			undefined,
+			{ cwd: "/workspace" },
+		);
+
+		expect(fetchMock).toHaveBeenCalledWith(
+			"http://127.0.0.1:8091/v1/question-bank/record_1",
+			expect.objectContaining({ method: "GET" }),
+		);
+		expect(JSON.parse(result.content[0]?.text ?? "{}")).toEqual(entry);
+	});
+
+	it("searches stored questions through bounded filters", async () => {
+		const entry = {
+			record_id: "record_1",
+			document_id: "exam_1",
+			question_id: "question_2",
+			question_json: { question: { question_text: "TCP 题目" } },
+		};
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(JSON.stringify({ questions: [entry] }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			}),
+		);
+
+		const result = await registeredQuestionBankTool().execute(
+			"call_bank_search",
+			{
+				operation: "search_questions",
+				subject: "Computer Science",
+				difficulty: "medium",
+				knowledge_point: "TCP",
+				limit: 10,
+			},
+			undefined,
+			undefined,
+			{ cwd: "/workspace" },
+		);
+
+		expect(fetchMock).toHaveBeenCalledWith(
+			"http://127.0.0.1:8091/v1/question-bank/search?subject=Computer+Science&difficulty=medium&knowledge_point=TCP&limit=10",
+			expect.objectContaining({ method: "GET" }),
+		);
+		expect(JSON.parse(result.content[0]?.text ?? "{}")).toEqual({ questions: [entry] });
 	});
 });

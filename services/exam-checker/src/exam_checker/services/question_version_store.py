@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from uuid import UUID, uuid4
 
-from ..domain.models import QuestionView, StoredQuestionVersion
+from ..domain.models import QuestionChangeLog, QuestionView, StoredQuestionVersion
 from .persistence import QuestionVersionConflictError, QuestionVersionNotFoundError
 
 
@@ -45,6 +45,7 @@ class InMemoryQuestionVersionRepository:
         base_version_id: UUID,
         revision_source: str,
         question: QuestionView,
+        change_log: QuestionChangeLog,
     ) -> StoredQuestionVersion:
         async with self._lock:
             versions = self._versions.get((document_id, question_id))
@@ -63,6 +64,7 @@ class InMemoryQuestionVersionRepository:
                 parent_version_id=latest.version_id,
                 revision_source=revision_source,
                 question=question,
+                change_log=change_log,
             )
             versions.append(version)
             return version

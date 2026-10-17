@@ -7,7 +7,12 @@ import re
 import httpx
 from pydantic import ValidationError
 
-from ..domain.models import QuestionMetadata, QuestionView, ReviewError
+from ..domain.models import (
+    QuestionMetadata,
+    QuestionRevisionResult,
+    QuestionView,
+    ReviewError,
+)
 from ..prompts.repositories import SinglePromptRepository
 
 
@@ -46,7 +51,8 @@ class OpenAICompatibleQuestionWorkflowModel:
         question: QuestionView,
         errors: list[ReviewError],
         user_instruction: str,
-    ) -> QuestionView:
+        proposed_question: QuestionView | None = None,
+    ) -> QuestionRevisionResult:
         user_prompt = (
             "【原题 JSON】\n"
             f"{json.dumps(question.model_dump(mode='json'), ensure_ascii=False)}\n\n"
@@ -54,21 +60,31 @@ class OpenAICompatibleQuestionWorkflowModel:
             f"{json.dumps([error.model_dump(mode='json') for error in errors], ensure_ascii=False)}\n\n"
             "【用户补充修改意见】\n"
             f"{user_instruction}"
+            + (
+                "\n\n【用户提交的修改后题目 JSON】\n"
+                f"{json.dumps(proposed_question.model_dump(mode='json'), ensure_ascii=False)}"
+                if proposed_question is not None
+                else ""
+            )
         )
         content = await self._complete(
             self.revision_prompts.system_prompt(), user_prompt
         )
         try:
-            revised = QuestionView.model_validate_json(content)
+            result = QuestionRevisionResult.model_validate_json(content)
         except ValidationError as exc:
             raise QuestionWorkflowModelError(
-                f"Revision response violates the question schema: {exc}"
+                f"Revision response violates the result schema: {exc}"
             ) from exc
-        if revised.document_id != question.document_id:
+        if result.question.document_id != question.document_id:
             raise QuestionWorkflowModelError("Revision changed document_id")
-        if revised.question_id != question.question_id:
+        if result.question.question_id != question.question_id:
             raise QuestionWorkflowModelError("Revision changed question_id")
-        return revised
+        if proposed_question is not None and result.question != proposed_question:
+            raise QuestionWorkflowModelError(
+                "Revision model changed the user-submitted question"
+            )
+        return result
 
     async def annotate(self, question: QuestionView) -> QuestionMetadata:
         user_prompt = json.dumps(question.model_dump(mode="json"), ensure_ascii=False)

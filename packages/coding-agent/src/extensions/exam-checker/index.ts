@@ -10,10 +10,11 @@ const examCheckerParameters = Type.Object({
 			Type.Literal("review_document"),
 			Type.Literal("review_question"),
 			Type.Literal("revise_question"),
+			Type.Literal("get_question_state"),
 		],
 		{
 			description:
-				"Choose review_file for an original PDF/DOC/DOCX, review_document for every question in a parsed document, review_question for one parsed question, or revise_question to modify and re-review one question.",
+				"Choose review_file for an original PDF/DOC/DOCX, review_document for every question in a parsed document, review_question for one parsed question, revise_question to modify and re-review one question, or get_question_state to read its latest version and workflow state.",
 		},
 	),
 	file_path: Type.Optional(
@@ -36,6 +37,24 @@ const examCheckerParameters = Type.Object({
 	user_instruction: Type.Optional(
 		Type.String({ description: "Optional user instruction for the question revision model." }),
 	),
+});
+
+const questionBankParameters = Type.Object({
+	operation: Type.Union([Type.Literal("get_question"), Type.Literal("search_questions")], {
+		description:
+			"Choose get_question to load one accepted question by record_id, or search_questions to query accepted questions through bounded filters.",
+	}),
+	record_id: Type.Optional(Type.String({ description: "Question-bank record ID. Required only for get_question." })),
+	subject: Type.Optional(Type.String({ description: "Exact subject filter for search_questions." })),
+	question_type: Type.Optional(Type.String({ description: "Exact question-type filter for search_questions." })),
+	difficulty: Type.Optional(
+		Type.Union([Type.Literal("easy"), Type.Literal("medium"), Type.Literal("hard")], {
+			description: "Exact difficulty filter for search_questions.",
+		}),
+	),
+	knowledge_point: Type.Optional(Type.String({ description: "Exact knowledge-point filter for search_questions." })),
+	keyword: Type.Optional(Type.String({ description: "Case-insensitive substring filter on question_text." })),
+	limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, description: "Maximum results; defaults to 20." })),
 });
 
 export type ExamCheckerStatus = "PASS" | "NEEDS_REVISION" | "UNRESOLVED";
@@ -86,6 +105,11 @@ type ExamCheckerErrorCode =
 	| "INVALID_EXAM_CHECKER_INPUT"
 	| "INVALID_EXAM_CHECKER_RESPONSE";
 
+type QuestionBankErrorCode =
+	| "QUESTION_BANK_UNAVAILABLE"
+	| "INVALID_QUESTION_BANK_INPUT"
+	| "INVALID_QUESTION_BANK_RESPONSE";
+
 export interface ExamCheckerToolDetails {
 	fullReview?: unknown;
 	parsedDocument?: unknown;
@@ -95,11 +119,30 @@ export interface ExamCheckerToolDetails {
 	};
 }
 
+export interface QuestionBankToolDetails {
+	fullResult?: unknown;
+	error?: {
+		code: QuestionBankErrorCode;
+		status?: number;
+	};
+}
+
 class ExamCheckerToolError extends Error {
 	readonly code: ExamCheckerErrorCode;
 	readonly status: number | undefined;
 
 	constructor(code: ExamCheckerErrorCode, status?: number) {
+		super(code);
+		this.code = code;
+		this.status = status;
+	}
+}
+
+class QuestionBankToolError extends Error {
+	readonly code: QuestionBankErrorCode;
+	readonly status: number | undefined;
+
+	constructor(code: QuestionBankErrorCode, status?: number) {
 		super(code);
 		this.code = code;
 		this.status = status;
@@ -224,6 +267,52 @@ async function requestJson(url: string, init: RequestInit): Promise<unknown> {
 	}
 }
 
+async function requestQuestionBankJson(url: string, init: RequestInit): Promise<unknown> {
+	let response: Response;
+	try {
+		response = await fetch(url, init);
+	} catch {
+		throw new QuestionBankToolError("QUESTION_BANK_UNAVAILABLE");
+	}
+	if (!response.ok) {
+		throw new QuestionBankToolError("QUESTION_BANK_UNAVAILABLE", response.status);
+	}
+	try {
+		return await response.json();
+	} catch {
+		throw new QuestionBankToolError("INVALID_QUESTION_BANK_RESPONSE");
+	}
+}
+
+function questionBankEntry(value: unknown): Record<string, unknown> {
+	if (!isRecord(value) || !isRecord(value.question_json)) {
+		throw new QuestionBankToolError("INVALID_QUESTION_BANK_RESPONSE");
+	}
+	const recordId = value.record_id;
+	const documentId = value.document_id;
+	const questionId = value.question_id;
+	const sourceVersionId = value.source_version_id;
+	if (
+		typeof recordId !== "string" ||
+		recordId.length === 0 ||
+		typeof documentId !== "string" ||
+		documentId.length === 0 ||
+		typeof questionId !== "string" ||
+		questionId.length === 0
+	) {
+		throw new QuestionBankToolError("INVALID_QUESTION_BANK_RESPONSE");
+	}
+	return {
+		record_id: recordId,
+		document_id: documentId,
+		question_id: questionId,
+		...(typeof sourceVersionId === "string" && sourceVersionId.length > 0
+			? { source_version_id: sourceVersionId }
+			: {}),
+		question_json: value.question_json,
+	};
+}
+
 function requireOnly(value: string | undefined, forbidden: unknown[]): string {
 	if (!value || forbidden.some((item) => item !== undefined)) {
 		throw new ExamCheckerToolError("INVALID_EXAM_CHECKER_INPUT");
@@ -236,10 +325,10 @@ export default function examCheckerExtension(pi: ExtensionAPI): void {
 		name: "exam_checker",
 		label: "exam checker",
 		description:
-			"Run the exam-checker workflow to parse and review exams, review one question, or revise and re-review one question.",
-		promptSnippet: "Parse, review, or revise exam questions through the exam-checker workflow",
+			"Run the exam-checker workflow to parse and review exams, review or revise a question, or read a question's latest workflow state.",
+		promptSnippet: "Parse, review, revise, or inspect exam questions through the exam-checker workflow",
 		promptGuidelines: [
-			"Use review_file for an original PDF, DOC, or DOCX; review_document for every question in a document_id; review_question for one document_id and question_id; revise_question only after a review, using its document_id, question_id, and question_version_id as base_version_id.",
+			"Use review_file for an original PDF, DOC, or DOCX; review_document for every question in a document_id; review_question for one document_id and question_id; get_question_state before revision when the latest version or status is unknown; revise_question only after a NEEDS_REVISION review, using the state result's question_version_id as base_version_id.",
 			"For revise_question, pass a complete user-edited question_json when the user supplied the replacement; otherwise pass the user's revision request as user_instruction so the service can apply the recorded review errors.",
 			"Treat exam_checker.status as the sole review decision: PASS is eligible for automatic ingestion; NEEDS_REVISION must be returned to the user with the reported errors; UNRESOLVED means review is incomplete.",
 			"For UNRESOLVED results, report unresolved_checks and never claim that the question or document passed.",
@@ -249,6 +338,27 @@ export default function examCheckerExtension(pi: ExtensionAPI): void {
 		executionMode: "parallel",
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			try {
+				if (params.operation === "get_question_state") {
+					const documentId = requireOnly(params.document_id, [
+						params.file_path,
+						params.base_version_id,
+						params.question_json,
+						params.user_instruction,
+					]);
+					if (!params.question_id) throw new ExamCheckerToolError("INVALID_EXAM_CHECKER_INPUT");
+					const fullReview = await requestJson(
+						`${serviceUrl()}/v1/exam-checker/documents/${encodeURIComponent(documentId)}/questions/${encodeURIComponent(params.question_id)}/state`,
+						{ method: "GET", signal },
+					);
+					if (!isRecord(fullReview)) {
+						throw new ExamCheckerToolError("INVALID_EXAM_CHECKER_RESPONSE");
+					}
+					return {
+						content: [{ type: "text", text: JSON.stringify(fullReview) }],
+						details: { fullReview },
+					};
+				}
+
 				if (params.operation === "revise_question") {
 					const documentId = requireOnly(params.document_id, [params.file_path]);
 					if (!params.question_id || !params.base_version_id) {
@@ -342,6 +452,77 @@ export default function examCheckerExtension(pi: ExtensionAPI): void {
 					error instanceof ExamCheckerToolError
 						? error
 						: new ExamCheckerToolError("INVALID_EXAM_CHECKER_RESPONSE");
+				return {
+					content: [{ type: "text", text: JSON.stringify({ error: known.code }) }],
+					details: { error: { code: known.code, ...(known.status ? { status: known.status } : {}) } },
+					isError: true,
+				};
+			}
+		},
+	});
+
+	pi.registerTool<typeof questionBankParameters, QuestionBankToolDetails>({
+		name: "question_bank",
+		label: "question bank",
+		description:
+			"Read accepted questions from the shared question bank by record ID or bounded metadata and text filters.",
+		promptSnippet: "Read or search accepted questions in the shared question bank",
+		promptGuidelines: [
+			"Use get_question when a question-bank record_id is known; use search_questions to find accepted questions by subject, question type, difficulty, knowledge point, or question-text keyword.",
+			"Treat returned question_json as the complete stored question record. Do not invent fields or assume that omitted search results exist.",
+			"This tool is read-only. Use exam_checker for review, revision, and workflow state.",
+		],
+		parameters: questionBankParameters,
+		executionMode: "parallel",
+		async execute(_toolCallId, params, signal) {
+			try {
+				let fullResult: unknown;
+				if (params.operation === "get_question") {
+					if (
+						!params.record_id ||
+						params.subject !== undefined ||
+						params.question_type !== undefined ||
+						params.difficulty !== undefined ||
+						params.knowledge_point !== undefined ||
+						params.keyword !== undefined ||
+						params.limit !== undefined
+					) {
+						throw new QuestionBankToolError("INVALID_QUESTION_BANK_INPUT");
+					}
+					fullResult = await requestQuestionBankJson(
+						`${serviceUrl()}/v1/question-bank/${encodeURIComponent(params.record_id)}`,
+						{ method: "GET", signal },
+					);
+					fullResult = questionBankEntry(fullResult);
+				} else {
+					if (params.record_id !== undefined) {
+						throw new QuestionBankToolError("INVALID_QUESTION_BANK_INPUT");
+					}
+					const query = new URLSearchParams();
+					if (params.subject) query.set("subject", params.subject);
+					if (params.question_type) query.set("question_type", params.question_type);
+					if (params.difficulty) query.set("difficulty", params.difficulty);
+					if (params.knowledge_point) query.set("knowledge_point", params.knowledge_point);
+					if (params.keyword) query.set("keyword", params.keyword);
+					if (params.limit !== undefined) query.set("limit", String(params.limit));
+					const response = await requestQuestionBankJson(
+						`${serviceUrl()}/v1/question-bank/search${query.size > 0 ? `?${query}` : ""}`,
+						{ method: "GET", signal },
+					);
+					if (!isRecord(response) || !Array.isArray(response.questions)) {
+						throw new QuestionBankToolError("INVALID_QUESTION_BANK_RESPONSE");
+					}
+					fullResult = { questions: response.questions.map(questionBankEntry) };
+				}
+				return {
+					content: [{ type: "text", text: JSON.stringify(fullResult) }],
+					details: { fullResult },
+				};
+			} catch (error) {
+				const known =
+					error instanceof QuestionBankToolError
+						? error
+						: new QuestionBankToolError("INVALID_QUESTION_BANK_RESPONSE");
 				return {
 					content: [{ type: "text", text: JSON.stringify({ error: known.code }) }],
 					details: { error: { code: known.code, ...(known.status ? { status: known.status } : {}) } },

@@ -5,7 +5,13 @@ from typing import Any, Protocol
 from uuid import UUID
 from uuid import uuid4
 
-from ..domain.models import QuestionView, ReviewedQuestion, StoredQuestionVersion
+from ..domain.models import (
+    QuestionChangeLog,
+    QuestionView,
+    ReviewedQuestion,
+    StoredQuestionBankEntry,
+    StoredQuestionVersion,
+)
 
 
 class ReviewNotFoundError(KeyError):
@@ -13,6 +19,10 @@ class ReviewNotFoundError(KeyError):
 
 
 class QuestionAlreadyStoredError(ValueError):
+    pass
+
+
+class QuestionBankEntryNotFoundError(KeyError):
     pass
 
 
@@ -37,6 +47,10 @@ class QuestionReviewRepository(Protocol):
         self, document_id: str, question_id: str
     ) -> StoredQuestionReview: ...
 
+    async def get_latest_for_version(
+        self, document_id: str, question_id: str, question_version_id: UUID
+    ) -> StoredQuestionReview: ...
+
 
 class QuestionBankRepository(Protocol):
     async def store(
@@ -50,12 +64,40 @@ class QuestionBankRepository(Protocol):
         question_json: dict[str, Any],
     ) -> None: ...
 
+    async def get(self, record_id: UUID) -> StoredQuestionBankEntry: ...
+
+    async def get_by_source(
+        self, document_id: str, question_id: str
+    ) -> StoredQuestionBankEntry | None: ...
+
+    async def search(
+        self,
+        *,
+        subject: str | None,
+        question_type: str | None,
+        difficulty: str | None,
+        knowledge_point: str | None,
+        keyword: str | None,
+        limit: int,
+    ) -> list[StoredQuestionBankEntry]: ...
+
 
 class QuestionVersionRepository(Protocol):
     async def initialize(self, questions: list[QuestionView]) -> None: ...
 
     async def get_latest(
         self, document_id: str, question_id: str
+    ) -> StoredQuestionVersion: ...
+
+    async def create_revision(
+        self,
+        *,
+        document_id: str,
+        question_id: str,
+        base_version_id: UUID,
+        revision_source: str,
+        question: QuestionView,
+        change_log: QuestionChangeLog,
     ) -> StoredQuestionVersion: ...
 
 
@@ -78,12 +120,11 @@ class InMemoryQuestionReviewRepository:
             raise ReviewNotFoundError((document_id, question_id))
         return reviews[-1]
 
-    async def create_revision(
-        self,
-        *,
-        document_id: str,
-        question_id: str,
-        base_version_id: UUID,
-        revision_source: str,
-        question: QuestionView,
-    ) -> StoredQuestionVersion: ...
+    async def get_latest_for_version(
+        self, document_id: str, question_id: str, question_version_id: UUID
+    ) -> StoredQuestionReview:
+        reviews = self._reviews.get((document_id, question_id), [])
+        for stored in reversed(reviews):
+            if stored.review.question_version_id == str(question_version_id):
+                return stored
+        raise ReviewNotFoundError((document_id, question_id, question_version_id))

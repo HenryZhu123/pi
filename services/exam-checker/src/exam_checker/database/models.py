@@ -97,6 +97,7 @@ class QuestionVersionRow(Base):
     )
     revision_source: Mapped[str] = mapped_column(String, nullable=False)
     question_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    change_log: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

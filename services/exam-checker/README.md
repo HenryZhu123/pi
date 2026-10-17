@@ -39,7 +39,7 @@ alembic upgrade head
 The schema stores complete JSON in PostgreSQL `JSONB` columns:
 
 - `exam_documents`: one complete `ExamDocument` per parsed file.
-- `question_versions`: immutable complete single-question JSON; parsing creates version 1 and every edit appends a version.
+- `question_versions`: immutable complete single-question JSON; parsing creates version 1 and every edit appends a version. Edited versions also store a JSONB `change_log` containing `user_instruction`, `review_feedback`, a model-written natural-language `changes` record, and `model`.
 - `question_reviews`: one append-only complete `ReviewedQuestion` per review run.
 - `question_bank`: one complete, metadata-enriched question JSON per accepted question.
 
@@ -52,11 +52,14 @@ still use PostgreSQL's required internal indexes.
 - `GET /v1/exam-checker/documents/{document_id}`
 - `GET /v1/exam-checker/documents/{document_id}/questions`
 - `GET /v1/exam-checker/documents/{document_id}/questions/{question_id}`
+- `GET /v1/exam-checker/documents/{document_id}/questions/{question_id}/state`
 - `GET /v1/exam-checker/documents/{document_id}/questions/{question_id}/checker-payload`
 - `POST /v1/exam-checker/documents/{document_id}/review`
 - `POST /v1/exam-checker/documents/{document_id}/questions/{question_id}/review`
 - `POST /v1/exam-checker/documents/{document_id}/questions/{question_id}/revise`
 - `POST /v1/exam-checker/documents/{document_id}/questions/{question_id}/ingest`
+- `GET /v1/question-bank/search`
+- `GET /v1/question-bank/{record_id}`
 
 The ingestion endpoint requires the latest persisted review to be `PASS`. Its JSON body
 must contain the matching `document_id`, `question_id`, `review_status: "PASS"`, a
@@ -65,9 +68,11 @@ complete `question` JSON object, and `metadata` containing `difficulty` and a no
 automatically after a passed review.
 
 The revision endpoint requires `base_version_id`. It accepts either a complete user-edited
-`question_json` or `user_instruction`. AI revision receives the complete latest question
-JSON, the latest review's `errors`, and the user instruction without converting the question
-to another schema. It then creates a new version and runs all nine checks again. A stale
+`question_json` or `user_instruction`. The revision model receives the complete latest
+question JSON, the latest review's `errors`, and the user instruction without converting the
+question to another schema. It returns the complete revised question plus one natural-language
+`changes` record; the service builds the four-field `change_log`, creates a new version, and
+runs all nine checks again. A stale
 `base_version_id` returns HTTP 409 instead of overwriting a newer edit.
 
 The MinerU Agent API accepts files up to 10 MB and PDFs up to 20 pages. It is IP-rate-limited and returns only Markdown.
@@ -135,12 +140,18 @@ The response separates whole-question state from per-task execution:
 
 ## Pi tool result
 
-Set `EXAM_CHECKER_SERVICE_URL` when the service is not available at `http://127.0.0.1:8091`. The built-in `exam_checker` tool exposes four operations:
+Set `EXAM_CHECKER_SERVICE_URL` when the service is not available at `http://127.0.0.1:8091`. The built-in `exam_checker` tool exposes five operations:
 
 - `review_file`: accepts `file_path`, parses the original PDF/DOC/DOCX once, then reviews every extracted question.
 - `review_document`: accepts `document_id` and reviews every question without repeating MinerU parsing.
 - `review_question`: accepts `document_id` and `question_id` and reviews only that question.
 - `revise_question`: accepts `document_id`, `question_id`, `base_version_id`, and either a complete `question_json` or `user_instruction`; it creates a new version and re-reviews it.
+- `get_question_state`: accepts `document_id` and `question_id`; it returns the latest complete question version, its version-specific review result, change log, and question-bank state.
+
+The separate read-only `question_bank` tool exposes two operations:
+
+- `get_question`: reads one accepted question by `record_id`.
+- `search_questions`: returns at most 100 accepted questions using optional exact `subject`, `question_type`, `difficulty`, or `knowledge_point` filters and a `question_text` substring filter. Every result contains the complete stored `question_json`; the tool does not expose arbitrary SQL.
 
 The operation parameters are mutually exclusive. The tool keeps the full response in tool details for audit and sends only decision-relevant JSON to the model:
 

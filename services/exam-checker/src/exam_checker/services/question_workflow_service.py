@@ -5,7 +5,9 @@ from uuid import UUID
 
 from ..domain.models import (
     IngestionResult,
+    QuestionChangeLog,
     QuestionMetadata,
+    QuestionRevisionResult,
     QuestionView,
     ReviewedQuestion,
     ReviewError,
@@ -26,12 +28,15 @@ class QuestionIdentityError(ValueError):
 
 
 class QuestionWorkflowModel(Protocol):
+    model: str
+
     async def revise(
         self,
         question: QuestionView,
         errors: list[ReviewError],
         user_instruction: str,
-    ) -> QuestionView: ...
+        proposed_question: QuestionView | None = None,
+    ) -> QuestionRevisionResult: ...
 
     async def annotate(self, question: QuestionView) -> QuestionMetadata: ...
 
@@ -74,30 +79,41 @@ class QuestionWorkflowService:
             raise QuestionVersionConflictError(
                 "The question changed after the requested base version"
             )
-        if question_json is None:
-            stored_review = await self.review_repository.get_latest(
-                document_id, question_id
+        stored_review = await self.review_repository.get_latest(
+            document_id, question_id
+        )
+        if stored_review.review.review.status != "NEEDS_REVISION":
+            raise QuestionRevisionNotAllowedError(
+                "Revision requires a latest NEEDS_REVISION review"
             )
-            if stored_review.review.review.status != "NEEDS_REVISION":
-                raise QuestionRevisionNotAllowedError(
-                    "AI revision requires a latest NEEDS_REVISION review"
-                )
-            revised = await self.model.revise(
-                current.question,
-                stored_review.review.review.summary.errors,
-                user_instruction,
-            )
-            revision_source = "AI_EDIT"
-        else:
-            revised = QuestionView.model_validate(question_json)
-            revision_source = "USER_EDIT"
+        review_feedback = stored_review.review.review.summary.errors
+        proposed_question = (
+            QuestionView.model_validate(question_json)
+            if question_json is not None
+            else None
+        )
+        revision_result = await self.model.revise(
+            current.question,
+            review_feedback,
+            user_instruction,
+            proposed_question,
+        )
+        revised = revision_result.question
+        revision_source = "USER_EDIT" if proposed_question is not None else "AI_EDIT"
         self._validate_identity(current.question, revised)
+        change_log = QuestionChangeLog(
+            user_instruction=user_instruction,
+            review_feedback=review_feedback,
+            changes=revision_result.changes,
+            model=self.model.model,
+        )
         version = await self.version_repository.create_revision(
             document_id=document_id,
             question_id=question_id,
             base_version_id=base_version_id,
             revision_source=revision_source,
             question=revised,
+            change_log=change_log,
         )
         return await self._review_version(version)
 

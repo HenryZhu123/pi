@@ -9,13 +9,16 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..domain.models import (
     ExamDocument,
+    QuestionChangeLog,
     QuestionView,
     ReviewedQuestion,
+    StoredQuestionBankEntry,
     StoredQuestionVersion,
 )
 from ..services.document_store import DocumentNotFoundError
 from ..services.persistence import (
     QuestionAlreadyStoredError,
+    QuestionBankEntryNotFoundError,
     ReviewNotFoundError,
     QuestionVersionConflictError,
     QuestionVersionNotFoundError,
@@ -100,6 +103,30 @@ class PostgresQuestionReviewRepository:
             review=ReviewedQuestion.model_validate(row.review_json),
         )
 
+    async def get_latest_for_version(
+        self, document_id: str, question_id: str, question_version_id: UUID
+    ) -> StoredQuestionReview:
+        statement = (
+            select(QuestionReviewRow)
+            .where(
+                QuestionReviewRow.document_id == document_id,
+                QuestionReviewRow.question_id == question_id,
+                QuestionReviewRow.question_version_id == question_version_id,
+            )
+            .order_by(QuestionReviewRow.created_at.desc())
+            .limit(1)
+        )
+        async with self.sessions() as session:
+            row = await session.scalar(statement)
+        if row is None:
+            raise ReviewNotFoundError(
+                (document_id, question_id, question_version_id)
+            )
+        return StoredQuestionReview(
+            review_id=row.review_id,
+            review=ReviewedQuestion.model_validate(row.review_json),
+        )
+
 
 class PostgresQuestionBankRepository:
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
@@ -135,6 +162,78 @@ class PostgresQuestionBankRepository:
                 )
             )
 
+    async def get(self, record_id: UUID) -> StoredQuestionBankEntry:
+        async with self.sessions() as session:
+            row = await session.get(QuestionBankRow, record_id)
+        if row is None:
+            raise QuestionBankEntryNotFoundError(record_id)
+        return self._to_domain(row)
+
+    async def get_by_source(
+        self, document_id: str, question_id: str
+    ) -> StoredQuestionBankEntry | None:
+        statement = select(QuestionBankRow).where(
+            QuestionBankRow.document_id == document_id,
+            QuestionBankRow.question_id == question_id,
+        )
+        async with self.sessions() as session:
+            row = await session.scalar(statement)
+        return self._to_domain(row) if row is not None else None
+
+    async def search(
+        self,
+        *,
+        subject: str | None,
+        question_type: str | None,
+        difficulty: str | None,
+        knowledge_point: str | None,
+        keyword: str | None,
+        limit: int,
+    ) -> list[StoredQuestionBankEntry]:
+        statement = select(QuestionBankRow)
+        if subject:
+            statement = statement.where(
+                QuestionBankRow.question_json["question"]["subject"].astext
+                == subject
+            )
+        if question_type:
+            statement = statement.where(
+                QuestionBankRow.question_json["question"]["question_type"].astext
+                == question_type
+            )
+        if difficulty:
+            statement = statement.where(
+                QuestionBankRow.question_json["metadata"]["difficulty"].astext
+                == difficulty
+            )
+        if knowledge_point:
+            statement = statement.where(
+                QuestionBankRow.question_json["metadata"][
+                    "knowledge_points"
+                ].contains([knowledge_point])
+            )
+        if keyword:
+            statement = statement.where(
+                QuestionBankRow.question_json["question"]["question_text"]
+                .astext.ilike(f"%{keyword}%")
+            )
+        statement = statement.order_by(QuestionBankRow.created_at.desc()).limit(limit)
+        async with self.sessions() as session:
+            rows = (await session.scalars(statement)).all()
+        return [self._to_domain(row) for row in rows]
+
+    @staticmethod
+    def _to_domain(row: QuestionBankRow) -> StoredQuestionBankEntry:
+        return StoredQuestionBankEntry(
+            record_id=str(row.record_id),
+            document_id=row.document_id,
+            question_id=row.question_id,
+            source_version_id=(
+                str(row.source_version_id) if row.source_version_id else None
+            ),
+            question_json=row.question_json,
+        )
+
 
 class PostgresQuestionVersionRepository:
     def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
@@ -153,6 +252,7 @@ class PostgresQuestionVersionRepository:
                     parent_version_id=None,
                     revision_source="PARSED",
                     question_json=question.model_dump(mode="json"),
+                    change_log=None,
                 )
                 await session.execute(
                     statement.on_conflict_do_nothing(
@@ -186,6 +286,7 @@ class PostgresQuestionVersionRepository:
         base_version_id: UUID,
         revision_source: str,
         question: QuestionView,
+        change_log: QuestionChangeLog,
     ) -> StoredQuestionVersion:
         statement = (
             select(QuestionVersionRow)
@@ -218,6 +319,7 @@ class PostgresQuestionVersionRepository:
                 parent_version_id=latest.version_id,
                 revision_source=revision_source,
                 question_json=question.model_dump(mode="json"),
+                change_log=change_log.model_dump(mode="json"),
             )
             session.add(row)
             await session.flush()
@@ -235,4 +337,9 @@ class PostgresQuestionVersionRepository:
             ),
             revision_source=row.revision_source,
             question=QuestionView.model_validate(row.question_json),
+            change_log=(
+                QuestionChangeLog.model_validate(row.change_log)
+                if row.change_log is not None
+                else None
+            ),
         )

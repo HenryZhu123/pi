@@ -4,7 +4,11 @@ from copy import deepcopy
 from typing import Any
 from uuid import UUID, uuid4
 
-from ..domain.models import IngestionResult
+from ..domain.models import (
+    IngestionResult,
+    QuestionBankSearchResult,
+    StoredQuestionBankEntry,
+)
 from .persistence import QuestionBankRepository, QuestionReviewRepository
 
 
@@ -25,6 +29,29 @@ class QuestionBankService:
     ) -> None:
         self.review_repository = review_repository
         self.question_bank_repository = question_bank_repository
+
+    async def get(self, record_id: UUID) -> StoredQuestionBankEntry:
+        return await self.question_bank_repository.get(record_id)
+
+    async def search(
+        self,
+        *,
+        subject: str | None = None,
+        question_type: str | None = None,
+        difficulty: str | None = None,
+        knowledge_point: str | None = None,
+        keyword: str | None = None,
+        limit: int = 20,
+    ) -> QuestionBankSearchResult:
+        questions = await self.question_bank_repository.search(
+            subject=subject,
+            question_type=question_type,
+            difficulty=difficulty,
+            knowledge_point=knowledge_point,
+            keyword=keyword,
+            limit=limit,
+        )
+        return QuestionBankSearchResult(questions=questions)
 
     async def ingest(
         self,

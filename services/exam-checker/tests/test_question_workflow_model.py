@@ -48,7 +48,17 @@ async def test_revision_prompt_passes_complete_question_and_errors_directly() ->
             200,
             json={
                 "choices": [
-                    {"message": {"content": revised.model_dump_json()}}
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "question": revised.model_dump(mode="json"),
+                                    "changes": "将题干中的‘错吴’修改为‘错误’，修正错别字。",
+                                },
+                                ensure_ascii=False,
+                            )
+                        }
+                    }
                 ]
             },
         )
@@ -73,7 +83,7 @@ async def test_revision_prompt_passes_complete_question_and_errors_directly() ->
         suggestion="修正错别字",
     )
 
-    revised = await model.revise(question, [error], "保持原题难度")
+    result = await model.revise(question, [error], "保持原题难度")
 
     user_prompt = captured["messages"][1]["content"]
     assert "【原题 JSON】" in user_prompt
@@ -82,5 +92,6 @@ async def test_revision_prompt_passes_complete_question_and_errors_directly() ->
     assert '"error_type": "错别字"' in user_prompt
     assert "【用户补充修改意见】\n保持原题难度" in user_prompt
     assert "current_question" not in user_prompt
-    assert revised.question_text == "以下哪项错误？"
+    assert result.question.question_text == "以下哪项错误？"
+    assert result.changes == "将题干中的‘错吴’修改为‘错误’，修正错别字。"
     await client.aclose()

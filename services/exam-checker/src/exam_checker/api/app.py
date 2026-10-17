@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 from uuid import UUID
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 
 from ..config import Settings
 from ..database import (
@@ -18,10 +18,13 @@ from ..domain.models import (
     CheckerPayload,
     ExamDocument,
     IngestionResult,
+    QuestionBankSearchResult,
+    QuestionState,
     QuestionView,
     ReviseQuestionRequest,
     ReviewedDocument,
     ReviewedQuestion,
+    StoredQuestionBankEntry,
 )
 from ..integrations.libreoffice import LibreOfficeConverter, LibreOfficeError
 from ..integrations.mineru_agent import (
@@ -55,6 +58,7 @@ from ..services.document_store import DocumentNotFoundError, InMemoryExamDocumen
 from ..services.persistence import (
     InMemoryQuestionReviewRepository,
     QuestionAlreadyStoredError,
+    QuestionBankEntryNotFoundError,
     QuestionVersionConflictError,
     QuestionVersionNotFoundError,
     ReviewNotFoundError,
@@ -65,6 +69,7 @@ from ..services.question_bank_service import (
     ReviewNotPassedError,
 )
 from ..services.question_service import QuestionNotFoundError, QuestionService
+from ..services.question_state_service import QuestionStateService
 from ..services.question_review_service import QuestionReviewService
 from ..services.question_version_store import InMemoryQuestionVersionRepository
 from ..services.question_workflow_service import (
@@ -93,14 +98,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         store = InMemoryExamDocumentStore()
         review_repository = InMemoryQuestionReviewRepository()
         version_repository = InMemoryQuestionVersionRepository()
+        question_bank_repository = None
         question_bank_service = None
     else:
         store = PostgresExamDocumentStore(database.sessions)
         review_repository = PostgresQuestionReviewRepository(database.sessions)
         version_repository = PostgresQuestionVersionRepository(database.sessions)
+        question_bank_repository = PostgresQuestionBankRepository(database.sessions)
         question_bank_service = QuestionBankService(
             review_repository=review_repository,
-            question_bank_repository=PostgresQuestionBankRepository(database.sessions),
+            question_bank_repository=question_bank_repository,
         )
     question_service = QuestionService()
     jev_prompts = JevPromptRepository(resolved.jev_prompt_root)
@@ -157,6 +164,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         word_converter=LibreOfficeConverter(),
         question_service=question_service,
         version_repository=version_repository,
+    )
+    question_state_service = QuestionStateService(
+        version_repository=version_repository,
+        review_repository=review_repository,
+        question_bank_repository=question_bank_repository,
     )
 
     @asynccontextmanager
@@ -243,6 +255,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except QuestionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="Question not found") from exc
         except QuestionVersionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Question not found") from exc
+
+    @application.get(
+        "/v1/exam-checker/documents/{document_id}/questions/{question_id}/state",
+        response_model=QuestionState,
+    )
+    async def get_question_state(
+        document_id: str, question_id: str
+    ) -> QuestionState:
+        try:
+            await store.get(document_id)
+            return await question_state_service.get(document_id, question_id)
+        except (DocumentNotFoundError, QuestionVersionNotFoundError) as exc:
             raise HTTPException(status_code=404, detail="Question not found") from exc
 
     @application.get(
@@ -356,6 +381,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except QuestionBankValidationError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @application.get(
+        "/v1/question-bank/search", response_model=QuestionBankSearchResult
+    )
+    async def search_question_bank(
+        subject: str | None = None,
+        question_type: str | None = None,
+        difficulty: str | None = None,
+        knowledge_point: str | None = None,
+        keyword: str | None = None,
+        limit: int = Query(default=20, ge=1, le=100),
+    ) -> QuestionBankSearchResult:
+        if question_bank_service is None:
+            raise HTTPException(
+                status_code=503, detail="PostgreSQL persistence is not configured"
+            )
+        return await question_bank_service.search(
+            subject=subject,
+            question_type=question_type,
+            difficulty=difficulty,
+            knowledge_point=knowledge_point,
+            keyword=keyword,
+            limit=limit,
+        )
+
+    @application.get(
+        "/v1/question-bank/{record_id}",
+        response_model=StoredQuestionBankEntry,
+    )
+    async def get_question_bank_entry(record_id: UUID) -> StoredQuestionBankEntry:
+        if question_bank_service is None:
+            raise HTTPException(
+                status_code=503, detail="PostgreSQL persistence is not configured"
+            )
+        try:
+            return await question_bank_service.get(record_id)
+        except QuestionBankEntryNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Question not found") from exc
+
     application.state.parse_service = parse_service
     application.state.document_store = store
     application.state.question_service = question_service
@@ -364,6 +427,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.database = database
     application.state.question_bank_service = question_bank_service
     application.state.question_workflow_service = question_workflow_service
+    application.state.question_state_service = question_state_service
     application.state.version_repository = version_repository
     return application
 

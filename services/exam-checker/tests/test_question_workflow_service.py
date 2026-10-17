@@ -8,6 +8,7 @@ from exam_checker.domain.models import (
     CheckerPayload,
     QuestionMetadata,
     QuestionReview,
+    QuestionRevisionResult,
     QuestionView,
     ReviewedQuestion,
     ReviewError,
@@ -41,12 +42,21 @@ def make_question() -> QuestionView:
 
 
 class FakeModel:
+    model = "revision-model"
     received_errors: list[ReviewError] = []
 
-    async def revise(self, question, errors, user_instruction):
+    async def revise(
+        self, question, errors, user_instruction, proposed_question=None
+    ):
         self.received_errors = errors
         assert user_instruction == "保持原题难度"
-        return question.model_copy(update={"question_text": "以下哪项错误？"})
+        revised = proposed_question or question.model_copy(
+            update={"question_text": "以下哪项错误？"}
+        )
+        return QuestionRevisionResult(
+            question=revised,
+            changes="将题干中的‘错吴’修改为‘错误’，修正错别字。",
+        )
 
     async def annotate(self, question):
         return QuestionMetadata(
@@ -148,6 +158,19 @@ async def test_ai_revision_creates_new_version_then_reviews_it() -> None:
     assert version_2.parent_version_id == version_1.version_id
     assert version_2.revision_source == "AI_EDIT"
     assert version_2.question.question_text == "以下哪项错误？"
+    assert version_2.change_log is not None
+    assert set(version_2.change_log.model_dump()) == {
+        "user_instruction",
+        "review_feedback",
+        "changes",
+        "model",
+    }
+    assert version_2.change_log.user_instruction == "保持原题难度"
+    assert version_2.change_log.review_feedback[0].error_type == "错别字"
+    assert version_2.change_log.changes == (
+        "将题干中的‘错吴’修改为‘错误’，修正错别字。"
+    )
+    assert version_2.change_log.model == "revision-model"
     assert reviewer.calls == [version_2.version_id]
     assert model.received_errors[0].error_type == "错别字"
     assert result.review.status == "PASS"
